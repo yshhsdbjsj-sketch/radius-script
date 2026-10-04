@@ -235,7 +235,7 @@ return function(cfg)
 			end
 			local size = hi - lo
 			focus = (lo + hi) / 2
-			baseDist = (size.Y / (2 * math.tan(math.rad(camera.FieldOfView / 2))) + size.Z / 2) * 0.8
+			baseDist = (size.Y / (2 * math.tan(math.rad(camera.FieldOfView / 2))) + size.Z / 2) * 0.92
 
 			model = built
 			loading = false
@@ -249,7 +249,7 @@ return function(cfg)
 		if not (view.Visible and model) then
 			return
 		end
-		yaw += dt * 0.6
+		yaw -= dt * 0.6
 		updateCamera()
 	end))
 
