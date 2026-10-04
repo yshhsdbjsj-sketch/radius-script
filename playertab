@@ -1,0 +1,534 @@
+-- player_tab.lua
+-- Usage:  loadstring(game:HttpGet(PLAYER_TAB_URL))()(lib)
+-- Returns a builder:  builder(opts) → { showPlayerPopups, hidePlayerPopups }
+--   opts = { pages, okAvatar, avatarFactory, slideInfo, fadeInfo }
+
+return function(lib)
+	local Players        = lib.Players
+	local TweenService   = lib.TweenService
+	local RunService     = lib.RunService
+	local TEXT_MAIN      = lib.TEXT_MAIN
+	local RADIUS         = lib.RADIUS
+	local addCorner      = lib.addCorner
+	local addStroke      = lib.addStroke
+	local win            = lib.win
+
+	return function(opts)
+		local pages        = opts.pages
+		local okAvatar     = opts.okAvatar
+		local avatarFactory = opts.avatarFactory
+		local slideInfo    = opts.slideInfo
+		local fadeInfo     = opts.fadeInfo
+
+		local page = pages["Player"]
+
+		local FIELD_STROKE   = Color3.fromRGB(46, 46, 51)
+		local FIELD_FOCUS    = Color3.fromRGB(95, 95, 104)
+		local TEXT_DIM       = Color3.fromRGB(130, 130, 136)
+		local TEXT_SOFT      = Color3.fromRGB(190, 190, 196)
+		local ROW_BG         = Color3.fromRGB(28, 28, 32)
+		local ROW_BG_SEL     = Color3.fromRGB(42, 42, 48)
+		local ROW_STROKE     = Color3.fromRGB(42, 42, 47)
+		local ROW_STROKE_HOVER = Color3.fromRGB(75, 75, 82)
+		local ROW_STROKE_SEL = Color3.fromRGB(120, 120, 130)
+
+		-- player count (right side of the heading row)
+		local count = Instance.new("TextLabel")
+		count.BackgroundTransparency = 1
+		count.AnchorPoint = Vector2.new(1, 0)
+		count.Position = UDim2.new(1, -20, 0, 14)
+		count.Size = UDim2.fromOffset(120, 26)
+		count.Font = Enum.Font.GothamMedium
+		count.Text = ""
+		count.TextColor3 = TEXT_DIM
+		count.TextSize = 13
+		count.TextXAlignment = Enum.TextXAlignment.Right
+		count.Parent = page
+
+		-- search bar
+		local search = Instance.new("TextBox")
+		search.Name = "PlayerSearch"
+		search.Position = UDim2.fromOffset(20, 62)
+		search.Size = UDim2.new(1, -40, 0, 34)
+		search.BackgroundColor3 = Color3.fromRGB(28, 28, 32)
+		search.BorderSizePixel = 0
+		search.ClearTextOnFocus = false
+		search.Font = Enum.Font.GothamMedium
+		search.PlaceholderText = "Search username or display name..."
+		search.PlaceholderColor3 = Color3.fromRGB(95, 95, 101)
+		search.Text = ""
+		search.TextColor3 = TEXT_MAIN
+		search.TextSize = 13
+		search.TextXAlignment = Enum.TextXAlignment.Left
+		search.Parent = page
+		addCorner(search)
+		local searchStroke = addStroke(search, FIELD_STROKE)
+
+		local searchPad = Instance.new("UIPadding")
+		searchPad.PaddingLeft = UDim.new(0, 12)
+		searchPad.PaddingRight = UDim.new(0, 12)
+		searchPad.Parent = search
+
+		search.Focused:Connect(function()
+			TweenService:Create(searchStroke, fadeInfo, {Color = FIELD_FOCUS}):Play()
+		end)
+		search.FocusLost:Connect(function()
+			TweenService:Create(searchStroke, fadeInfo, {Color = FIELD_STROKE}):Play()
+		end)
+
+		-- list card
+		local listCard = Instance.new("Frame")
+		listCard.Name = "PlayerList"
+		listCard.Position = UDim2.fromOffset(20, 106)
+		listCard.Size = UDim2.new(1, -40, 1, -122)
+		listCard.BackgroundColor3 = Color3.fromRGB(22, 22, 25)
+		listCard.BorderSizePixel = 0
+		listCard.Parent = page
+		addCorner(listCard)
+		addStroke(listCard, Color3.fromRGB(42, 42, 47))
+
+		local scroll = Instance.new("ScrollingFrame")
+		scroll.BackgroundTransparency = 1
+		scroll.BorderSizePixel = 0
+		scroll.Position = UDim2.fromOffset(6, 6)
+		scroll.Size = UDim2.new(1, -12, 1, -12)
+		scroll.CanvasSize = UDim2.new()
+		scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+		scroll.ScrollingDirection = Enum.ScrollingDirection.Y
+		scroll.ScrollBarThickness = 3
+		scroll.ScrollBarImageColor3 = Color3.fromRGB(90, 90, 98)
+		scroll.Parent = listCard
+
+		local layout = Instance.new("UIListLayout")
+		layout.Padding = UDim.new(0, 5)
+		layout.SortOrder = Enum.SortOrder.Name
+		layout.Parent = scroll
+
+		local scrollPad = Instance.new("UIPadding")
+		scrollPad.PaddingRight = UDim.new(0, 6)
+		scrollPad.Parent = scroll
+
+		local empty = Instance.new("TextLabel")
+		empty.BackgroundTransparency = 1
+		empty.AnchorPoint = Vector2.new(0.5, 0.5)
+		empty.Position = UDim2.fromScale(0.5, 0.5)
+		empty.Size = UDim2.new(1, -20, 0, 20)
+		empty.Font = Enum.Font.GothamMedium
+		empty.Text = "No players found"
+		empty.TextColor3 = TEXT_DIM
+		empty.TextSize = 13
+		empty.Visible = false
+		empty.Parent = listCard
+
+		local rows, rowStrokes = {}, {}
+		local selected
+
+		-- ====================================================
+		-- profile popup (below the main window)
+		-- ====================================================
+		local PROFILE_H, PROFILE_GAP = 134, 6
+
+		local profile = Instance.new("Frame")
+		profile.Name = "ProfilePopup"
+		profile.AnchorPoint = Vector2.new(0.5, 0.5)
+		profile.Size = UDim2.new(1, 0, 0, PROFILE_H)
+		profile.Position = UDim2.new(0.5, 0, 1, PROFILE_GAP + PROFILE_H / 2)
+		profile.BackgroundColor3 = Color3.fromRGB(22, 22, 25)
+		profile.BorderSizePixel = 0
+		profile.Visible = false
+		profile.Parent = win.frame
+		addCorner(profile)
+		addStroke(profile, Color3.fromRGB(42, 42, 47))
+
+		local profileScale = Instance.new("UIScale")
+		profileScale.Scale = 0.92
+		profileScale.Parent = profile
+
+		local headshot = Instance.new("ImageLabel")
+		headshot.BackgroundColor3 = Color3.fromRGB(16, 16, 19)
+		headshot.BorderSizePixel = 0
+		headshot.Position = UDim2.fromOffset(14, 14)
+		headshot.Size = UDim2.fromOffset(106, 106)
+		headshot.Parent = profile
+		addCorner(headshot)
+		addStroke(headshot, Color3.fromRGB(42, 42, 47))
+
+		local function infoLabel(y, size, font, color)
+			local l = Instance.new("TextLabel")
+			l.BackgroundTransparency = 1
+			l.Position = UDim2.fromOffset(134, y)
+			l.Size = UDim2.new(1, -(134 + 150), 0, size + 4)
+			l.Font = font
+			l.Text = ""
+			l.TextColor3 = color
+			l.TextSize = size
+			l.TextXAlignment = Enum.TextXAlignment.Left
+			l.TextTruncate = Enum.TextTruncate.AtEnd
+			l.Parent = profile
+			return l
+		end
+
+		local displayLabel = infoLabel(12, 16, Enum.Font.GothamBold,   TEXT_MAIN)
+		local userLabel    = infoLabel(34, 12, Enum.Font.Gotham,        TEXT_DIM)
+		local idLabel      = infoLabel(58, 12, Enum.Font.GothamMedium,  TEXT_SOFT)
+		local ageLabel     = infoLabel(76, 12, Enum.Font.GothamMedium,  TEXT_SOFT)
+		local teamLabel    = infoLabel(94, 12, Enum.Font.GothamMedium,  TEXT_SOFT)
+		local statusLabel  = infoLabel(112, 11, Enum.Font.Gotham,       TEXT_DIM)
+
+		local function profileButton(text, y)
+			local b = Instance.new("TextButton")
+			b.Name = text
+			b.AnchorPoint = Vector2.new(1, 0)
+			b.Position = UDim2.new(1, -14, 0, y)
+			b.Size = UDim2.fromOffset(122, 30)
+			b.BackgroundColor3 = Color3.fromRGB(36, 36, 41)
+			b.BorderSizePixel = 0
+			b.AutoButtonColor = false
+			b.Font = Enum.Font.GothamMedium
+			b.Text = text
+			b.TextColor3 = Color3.fromRGB(215, 215, 220)
+			b.TextSize = 13
+			b.Parent = profile
+			addCorner(b)
+			local s = addStroke(b, FIELD_STROKE)
+			b.MouseEnter:Connect(function()
+				TweenService:Create(b, fadeInfo, {BackgroundColor3 = Color3.fromRGB(48, 48, 55), TextColor3 = TEXT_MAIN}):Play()
+				TweenService:Create(s, fadeInfo, {Color = FIELD_FOCUS}):Play()
+			end)
+			b.MouseLeave:Connect(function()
+				TweenService:Create(b, fadeInfo, {BackgroundColor3 = Color3.fromRGB(36, 36, 41), TextColor3 = Color3.fromRGB(215, 215, 220)}):Play()
+				TweenService:Create(s, fadeInfo, {Color = FIELD_STROKE}):Play()
+			end)
+			return b
+		end
+
+		local tpBtn    = profileButton("Teleport",    14)
+		local specBtn  = profileButton("Spectate",    50)
+		local unspecBtn = profileButton("Unspectate", 86)
+
+		-- ====================================================
+		-- avatar popup (right of the main window)
+		-- ====================================================
+		local SIDE_W, SIDE_GAP = 260, 8
+
+		local side = Instance.new("Frame")
+		side.Name = "PlayerAvatarPopup"
+		side.AnchorPoint = Vector2.new(0.5, 0.5)
+		side.Size = UDim2.new(0, SIDE_W, 1, 0)
+		side.Position = UDim2.new(1, SIDE_GAP + SIDE_W / 2, 0.5, 0)
+		side.BackgroundColor3 = Color3.fromRGB(22, 22, 25)
+		side.BorderSizePixel = 0
+		side.Visible = false
+		side.Parent = win.frame
+		addCorner(side)
+		addStroke(side, Color3.fromRGB(42, 42, 47))
+
+		local sideScale = Instance.new("UIScale")
+		sideScale.Scale = 0.92
+		sideScale.Parent = side
+
+		local avatarInst
+		local avatarToken = 0
+
+		local function destroyAvatar()
+			avatarToken += 1
+			if avatarInst then
+				pcall(avatarInst.Destroy)
+				avatarInst = nil
+			end
+		end
+
+		local function loadAvatar(plr)
+			destroyAvatar()
+			local token = avatarToken
+			task.delay(0.15, function()
+				if token ~= avatarToken or selected ~= plr or not (okAvatar and avatarFactory) then return end
+				local ok, inst = pcall(avatarFactory, {
+					Parent  = side,
+					Radius  = RADIUS,
+					ZIndex  = 7,
+					UserId  = plr.UserId,
+				})
+				if ok and inst then
+					avatarInst = inst
+					inst.Show()
+				end
+			end)
+		end
+
+		-- ====================================================
+		-- teleport / spectate
+		-- ====================================================
+		local spectating, specConn
+
+		local function setStatus(text)
+			statusLabel.Text = text
+		end
+
+		local function stopSpectating()
+			if specConn then specConn:Disconnect(); specConn = nil end
+			spectating = nil
+			local cam  = workspace.CurrentCamera
+			local char = Players.LocalPlayer.Character
+			local hum  = char and char:FindFirstChildOfClass("Humanoid")
+			if cam and hum then cam.CameraSubject = hum end
+		end
+
+		local function spectate(plr)
+			if specConn then specConn:Disconnect(); specConn = nil end
+			spectating = plr
+			local char = plr.Character
+			local hum  = char and char:FindFirstChildOfClass("Humanoid")
+			if hum and workspace.CurrentCamera then
+				workspace.CurrentCamera.CameraSubject = hum
+				setStatus("Spectating " .. plr.DisplayName)
+			else
+				setStatus("Waiting for their character...")
+			end
+			specConn = plr.CharacterAdded:Connect(function(newChar)
+				local newHum = newChar:WaitForChild("Humanoid", 5)
+				if newHum and spectating == plr and workspace.CurrentCamera then
+					workspace.CurrentCamera.CameraSubject = newHum
+					setStatus("Spectating " .. plr.DisplayName)
+				end
+			end)
+		end
+
+		local function teleportTo(plr)
+			local myChar   = Players.LocalPlayer.Character
+			local myRoot   = myChar and myChar:FindFirstChild("HumanoidRootPart")
+			local theirChar = plr.Character
+			local theirRoot = theirChar and theirChar:FindFirstChild("HumanoidRootPart")
+			if myRoot and theirRoot then
+				myRoot.CFrame = theirRoot.CFrame * CFrame.new(0, 0, 3)
+				setStatus("Teleported to " .. plr.DisplayName)
+			else
+				setStatus("Can't teleport (no character)")
+			end
+		end
+
+		tpBtn.MouseButton1Click:Connect(function()    if selected then teleportTo(selected) end end)
+		specBtn.MouseButton1Click:Connect(function()  if selected then spectate(selected)   end end)
+		unspecBtn.MouseButton1Click:Connect(function() stopSpectating(); setStatus("Stopped spectating") end)
+
+		-- ====================================================
+		-- profile content
+		-- ====================================================
+		local function formatAge(days)
+			if days >= 365 then
+				return string.format("%d days (%.1f years)", days, days / 365)
+			end
+			return days .. " days"
+		end
+
+		local function applyTeam(plr)
+			local team = plr.Team
+			teamLabel.Text      = "Team: " .. (team and team.Name or "None")
+			teamLabel.TextColor3 = team and team.TeamColor.Color or TEXT_SOFT
+		end
+
+		local teamConn
+		local headshotToken = 0
+
+		local function fillProfile(plr)
+			displayLabel.Text = plr.DisplayName
+			userLabel.Text    = "@" .. plr.Name
+			idLabel.Text      = "User ID: " .. plr.UserId
+			ageLabel.Text     = "Account age: " .. formatAge(plr.AccountAge)
+			applyTeam(plr)
+			setStatus(spectating == plr and ("Spectating " .. plr.DisplayName) or "")
+
+			headshot.Image = ""
+			headshotToken += 1
+			local token = headshotToken
+			task.spawn(function()
+				local ok, img = pcall(function()
+					return Players:GetUserThumbnailAsync(plr.UserId, Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size150x150)
+				end)
+				if ok and token == headshotToken then headshot.Image = img end
+			end)
+
+			if teamConn then teamConn:Disconnect() end
+			teamConn = plr:GetPropertyChangedSignal("Team"):Connect(function()
+				applyTeam(plr)
+			end)
+		end
+
+		-- ====================================================
+		-- show / hide both popups
+		-- ====================================================
+		local popupsShown = false
+
+		local showPlayerPopups, hidePlayerPopups
+
+		showPlayerPopups = function()
+			if not selected then return end
+			popupsShown = true
+			profile.Visible = true
+			side.Visible    = true
+			TweenService:Create(profileScale, slideInfo, {Scale = 1}):Play()
+			TweenService:Create(sideScale,    slideInfo, {Scale = 1}):Play()
+			if avatarInst then avatarInst.Show() end
+		end
+
+		hidePlayerPopups = function()
+			if not popupsShown then return end
+			popupsShown = false
+			if avatarInst then avatarInst.Hide() end
+			for _, pair in ipairs({{profile, profileScale}, {side, sideScale}}) do
+				local out = TweenService:Create(pair[2], fadeInfo, {Scale = 0.92})
+				out.Completed:Connect(function()
+					if not popupsShown then pair[1].Visible = false end
+				end)
+				out:Play()
+			end
+		end
+
+		-- position: below / right of main window, or flip when no room
+		local followConn = RunService.RenderStepped:Connect(function()
+			if not profile.Visible then return end
+			local p, sz = win.frame.AbsolutePosition, win.frame.AbsoluteSize
+			local screen = win.gui.AbsoluteSize
+			local below = p.Y + sz.Y + PROFILE_GAP + PROFILE_H <= screen.Y
+			profile.Position = below
+				and UDim2.new(0.5, 0, 1, PROFILE_GAP + PROFILE_H / 2)
+				or  UDim2.new(0.5, 0, 0, -(PROFILE_GAP + PROFILE_H / 2))
+			local right = p.X + sz.X + SIDE_GAP + SIDE_W <= screen.X
+			side.Position = right
+				and UDim2.new(1, SIDE_GAP + SIDE_W / 2, 0.5, 0)
+				or  UDim2.new(0, -(SIDE_GAP + SIDE_W / 2), 0.5, 0)
+		end)
+
+		-- ====================================================
+		-- list rows
+		-- ====================================================
+		local function refreshRows()
+			for plr, row in pairs(rows) do
+				local sel = plr == selected
+				TweenService:Create(row,            fadeInfo, {BackgroundColor3 = sel and ROW_BG_SEL or ROW_BG}):Play()
+				TweenService:Create(rowStrokes[plr], fadeInfo, {Color = sel and ROW_STROKE_SEL or ROW_STROKE}):Play()
+			end
+		end
+
+		local function selectPlayer(plr)
+			selected = plr
+			refreshRows()
+			fillProfile(plr)
+			loadAvatar(plr)
+			showPlayerPopups()
+		end
+
+		local function applyFilter()
+			local q    = search.Text:lower()
+			local shown = 0
+			for plr, row in pairs(rows) do
+				local match = q == ""
+					or plr.Name:lower():find(q, 1, true) ~= nil
+					or plr.DisplayName:lower():find(q, 1, true) ~= nil
+				row.Visible = match
+				if match then shown += 1 end
+			end
+			empty.Visible = shown == 0
+			count.Text = #Players:GetPlayers() .. " players"
+		end
+
+		local function addRow(plr)
+			if rows[plr] then return end
+			local row = Instance.new("Frame")
+			row.Name = plr.DisplayName:lower() .. "|" .. plr.Name:lower()
+			row.Size = UDim2.new(1, 0, 0, 44)
+			row.BackgroundColor3 = ROW_BG
+			row.BorderSizePixel  = 0
+			row.Parent = scroll
+			addCorner(row)
+			local rowStroke = addStroke(row, ROW_STROKE)
+
+			local display = Instance.new("TextLabel")
+			display.BackgroundTransparency = 1
+			display.Position = UDim2.fromOffset(12, 5)
+			display.Size     = UDim2.new(1, -24, 0, 18)
+			display.Font     = Enum.Font.GothamMedium
+			display.Text     = plr.DisplayName
+			display.TextColor3 = TEXT_MAIN
+			display.TextSize   = 14
+			display.TextXAlignment  = Enum.TextXAlignment.Left
+			display.TextTruncate    = Enum.TextTruncate.AtEnd
+			display.Parent = row
+
+			local user = Instance.new("TextLabel")
+			user.BackgroundTransparency = 1
+			user.Position = UDim2.fromOffset(12, 23)
+			user.Size     = UDim2.new(1, -24, 0, 16)
+			user.Font     = Enum.Font.Gotham
+			user.Text     = "@" .. plr.Name .. (plr == Players.LocalPlayer and "  (you)" or "")
+			user.TextColor3 = TEXT_DIM
+			user.TextSize   = 12
+			user.TextXAlignment = Enum.TextXAlignment.Left
+			user.TextTruncate   = Enum.TextTruncate.AtEnd
+			user.Parent = row
+
+			local hit = Instance.new("TextButton")
+			hit.BackgroundTransparency = 1
+			hit.AutoButtonColor = false
+			hit.Text   = ""
+			hit.Size   = UDim2.fromScale(1, 1)
+			hit.ZIndex = 3
+			hit.Parent = row
+
+			hit.MouseEnter:Connect(function()
+				if selected ~= plr then
+					TweenService:Create(rowStroke, fadeInfo, {Color = ROW_STROKE_HOVER}):Play()
+				end
+			end)
+			hit.MouseLeave:Connect(function()
+				TweenService:Create(rowStroke, fadeInfo, {Color = selected == plr and ROW_STROKE_SEL or ROW_STROKE}):Play()
+			end)
+			hit.MouseButton1Click:Connect(function()
+				selectPlayer(plr)
+			end)
+
+			rows[plr]       = row
+			rowStrokes[plr] = rowStroke
+			if plr == selected then refreshRows() end
+			applyFilter()
+		end
+
+		local function removeRow(plr)
+			if plr == selected then
+				selected = nil
+				hidePlayerPopups()
+				destroyAvatar()
+				if teamConn then teamConn:Disconnect(); teamConn = nil end
+			end
+			if spectating == plr then stopSpectating() end
+			if rows[plr] then
+				rows[plr]:Destroy()
+				rows[plr]       = nil
+				rowStrokes[plr] = nil
+			end
+			applyFilter()
+		end
+
+		for _, plr in ipairs(Players:GetPlayers()) do addRow(plr) end
+		applyFilter()
+
+		search:GetPropertyChangedSignal("Text"):Connect(applyFilter)
+		local addedConn    = Players.PlayerAdded:Connect(addRow)
+		local removingConn = Players.PlayerRemoving:Connect(removeRow)
+
+		win.onClose(function()
+			addedConn:Disconnect()
+			removingConn:Disconnect()
+			followConn:Disconnect()
+			if teamConn then teamConn:Disconnect() end
+			stopSpectating()
+			destroyAvatar()
+			hidePlayerPopups()
+		end)
+
+		return {
+			showPlayerPopups = showPlayerPopups,
+			hidePlayerPopups = hidePlayerPopups,
+		}
+	end
+end
