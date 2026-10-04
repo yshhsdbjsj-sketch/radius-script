@@ -1,0 +1,357 @@
+return function(cfg)
+	local Players = game:GetService("Players")
+	local TweenService = game:GetService("TweenService")
+	local RunService = game:GetService("RunService")
+	local UIS = game:GetService("UserInputService")
+
+	local RADIUS = cfg.Radius or 5
+	local Z = cfg.ZIndex or 7
+	local userId = cfg.UserId or Players.LocalPlayer.UserId
+	local tweenInfo = TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+
+	local BTN_BG = Color3.fromRGB(28, 28, 32)
+	local BTN_HOVER_BG = Color3.fromRGB(40, 40, 46)
+	local STROKE = Color3.fromRGB(42, 42, 47)
+	local STROKE_HOVER = Color3.fromRGB(75, 75, 82)
+	local TEXT = Color3.fromRGB(190, 190, 196)
+	local TEXT_HOVER = Color3.fromRGB(245, 245, 248)
+
+	local conns = {}
+
+	-- root frame (fills the parent, swallows clicks)
+	local view = Instance.new("Frame")
+	view.Name = "Avatar3D"
+	view.BackgroundTransparency = 1
+	view.Size = UDim2.fromScale(1, 1)
+	view.ZIndex = Z
+	view.Active = true
+	view.Visible = false
+	view.Parent = cfg.Parent
+
+	local function addStroke(obj, color)
+		local s = Instance.new("UIStroke")
+		s.Color = color
+		s.Thickness = 1
+		s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+		s.Parent = obj
+		return s
+	end
+
+	local function addCorner(obj, radius)
+		local c = Instance.new("UICorner")
+		c.CornerRadius = UDim.new(0, radius or RADIUS)
+		c.Parent = obj
+	end
+
+	-- header
+	local title = Instance.new("TextLabel")
+	title.BackgroundTransparency = 1
+	title.Position = UDim2.fromOffset(14, 9)
+	title.Size = UDim2.new(0.4, 0, 0, 22)
+	title.Font = Enum.Font.GothamBold
+	title.Text = "AVATAR"
+	title.TextColor3 = Color3.fromRGB(110, 110, 116)
+	title.TextSize = 11
+	title.TextXAlignment = Enum.TextXAlignment.Left
+	title.Parent = view
+
+	local function mini(text, width, rightOffset)
+		local b = Instance.new("TextButton")
+		b.Name = text
+		b.AnchorPoint = Vector2.new(1, 0)
+		b.Position = UDim2.new(1, -rightOffset, 0, 9)
+		b.Size = UDim2.fromOffset(width, 22)
+		b.BackgroundColor3 = BTN_BG
+		b.BorderSizePixel = 0
+		b.AutoButtonColor = false
+		b.Font = Enum.Font.GothamMedium
+		b.Text = text
+		b.TextColor3 = TEXT
+		b.TextSize = 12
+		b.Parent = view
+		addCorner(b)
+		local s = addStroke(b, STROKE)
+		b.MouseEnter:Connect(function()
+			TweenService:Create(b, tweenInfo, {BackgroundColor3 = BTN_HOVER_BG, TextColor3 = TEXT_HOVER}):Play()
+			TweenService:Create(s, tweenInfo, {Color = STROKE_HOVER}):Play()
+		end)
+		b.MouseLeave:Connect(function()
+			TweenService:Create(b, tweenInfo, {BackgroundColor3 = BTN_BG, TextColor3 = TEXT}):Play()
+			TweenService:Create(s, tweenInfo, {Color = STROKE}):Play()
+		end)
+		return b
+	end
+
+	local backBtn = mini("Back", 52, 12)
+	local resetBtn = mini("Reset", 52, 70)
+	local spinBtn = mini("Spin: On", 76, 128)
+
+	local divider = Instance.new("Frame")
+	divider.BackgroundColor3 = Color3.fromRGB(38, 38, 42)
+	divider.BorderSizePixel = 0
+	divider.Position = UDim2.fromOffset(12, 40)
+	divider.Size = UDim2.new(1, -24, 0, 1)
+	divider.Parent = view
+
+	-- viewport
+	local viewport = Instance.new("ViewportFrame")
+	viewport.Position = UDim2.fromOffset(12, 48)
+	viewport.Size = UDim2.new(1, -24, 1, -60)
+	viewport.BackgroundColor3 = Color3.fromRGB(16, 16, 19)
+	viewport.BorderSizePixel = 0
+	viewport.Ambient = Color3.fromRGB(150, 150, 158)
+	viewport.LightColor = Color3.fromRGB(255, 255, 255)
+	viewport.Active = true
+	viewport.Parent = view
+	addCorner(viewport)
+	addStroke(viewport, STROKE)
+
+	local camera = Instance.new("Camera")
+	camera.FieldOfView = 40
+	viewport.CurrentCamera = camera
+	camera.Parent = viewport
+
+	local hint = Instance.new("TextLabel")
+	hint.BackgroundTransparency = 1
+	hint.AnchorPoint = Vector2.new(0.5, 1)
+	hint.Position = UDim2.new(0.5, 0, 1, -6)
+	hint.Size = UDim2.new(1, -16, 0, 14)
+	hint.Font = Enum.Font.GothamMedium
+	hint.Text = "Drag to rotate  -  Scroll to zoom"
+	hint.TextColor3 = Color3.fromRGB(90, 90, 96)
+	hint.TextSize = 11
+	hint.Parent = viewport
+
+	local status = Instance.new("TextLabel")
+	status.BackgroundTransparency = 1
+	status.AnchorPoint = Vector2.new(0.5, 0.5)
+	status.Position = UDim2.fromScale(0.5, 0.55)
+	status.Size = UDim2.new(1, -24, 0, 20)
+	status.Font = Enum.Font.GothamMedium
+	status.Text = ""
+	status.TextColor3 = Color3.fromRGB(120, 120, 126)
+	status.TextSize = 13
+	status.Parent = view
+
+	-- orbit camera state
+	local model, loading
+	local focus = Vector3.new(0, 3, 0)
+	local baseDist = 8
+	local yaw, pitch, dist = math.pi, 0.1, 8 -- yaw = pi looks at the front of the character
+	local spinning = true
+	local dragging = false
+	local lastMouse = Vector2.zero
+
+	local function updateCamera()
+		local dir = Vector3.new(math.sin(yaw) * math.cos(pitch), math.sin(pitch), math.cos(yaw) * math.cos(pitch))
+		camera.CFrame = CFrame.lookAt(focus + dir * dist, focus)
+		viewport.LightDirection = (camera.CFrame.LookVector + Vector3.new(0.35, -0.45, 0)).Unit
+	end
+
+	local function refreshSpin()
+		spinBtn.Text = spinning and "Spin: On" or "Spin: Off"
+	end
+
+	local function resetView()
+		yaw, pitch, dist = math.pi, 0.1, baseDist
+		spinning = true
+		refreshSpin()
+		updateCamera()
+	end
+
+	-- build the avatar (HumanoidDescription first, live character as a fallback)
+	local function load()
+		if model or loading then
+			return
+		end
+		loading = true
+		status.Text = "Loading avatar..."
+		status.Visible = true
+
+		task.spawn(function()
+			local source
+			local ok, result = pcall(function()
+				local desc = Players:GetHumanoidDescriptionFromUserId(userId)
+				return Players:CreateHumanoidModelFromDescription(desc, Enum.HumanoidRigType.R15)
+			end)
+			if ok and result then
+				source = result
+			else
+				local character = Players.LocalPlayer.Character
+				if character and userId == Players.LocalPlayer.UserId then
+					character.Archivable = true
+					local okClone, clone = pcall(function()
+						return character:Clone()
+					end)
+					if okClone then
+						source = clone
+					end
+				end
+			end
+
+			if not source then
+				loading = false
+				status.Text = "Couldn't load avatar"
+				return
+			end
+
+			for _, d in ipairs(source:GetDescendants()) do
+				if d:IsA("LuaSourceContainer") then
+					d:Destroy()
+				end
+			end
+			local humanoid = source:FindFirstChildOfClass("Humanoid")
+			if humanoid then
+				humanoid.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+			end
+
+			-- accessories only snap onto the body once the rig lives in the workspace:
+			-- park it far away (anchored) for a moment, then copy it
+			local built = source
+			pcall(function()
+				local root = source:FindFirstChild("HumanoidRootPart")
+				if root then
+					root.Anchored = true
+				end
+				source:PivotTo(CFrame.new(0, 5000, 0))
+				source.Parent = workspace
+				task.wait(0.5)
+				source.Archivable = true
+				local copy = source:Clone()
+				if copy then
+					source:Destroy()
+					built = copy
+				end
+			end)
+
+			for _, d in ipairs(built:GetDescendants()) do
+				if d:IsA("BasePart") then
+					d.Anchored = true
+				end
+			end
+			built.Parent = viewport
+			built:PivotTo(CFrame.new(0, 0, 0))
+
+			-- frame the body only (accessories can skew the bounds)
+			local lo, hi
+			for _, part in ipairs(built:GetChildren()) do
+				if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then
+					local pLo, pHi = part.Position - part.Size / 2, part.Position + part.Size / 2
+					if lo then
+						lo = Vector3.new(math.min(lo.X, pLo.X), math.min(lo.Y, pLo.Y), math.min(lo.Z, pLo.Z))
+						hi = Vector3.new(math.max(hi.X, pHi.X), math.max(hi.Y, pHi.Y), math.max(hi.Z, pHi.Z))
+					else
+						lo, hi = pLo, pHi
+					end
+				end
+			end
+			if not lo then
+				local boxCf, boxSize = built:GetBoundingBox()
+				lo, hi = boxCf.Position - boxSize / 2, boxCf.Position + boxSize / 2
+			end
+			local size = hi - lo
+			focus = (lo + hi) / 2
+			baseDist = size.Y / (2 * math.tan(math.rad(camera.FieldOfView / 2))) + size.Z / 2
+
+			model = built
+			loading = false
+			status.Visible = false
+			resetView()
+		end)
+	end
+
+	-- drag to rotate (polled every frame) + auto spin
+	viewport.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = true
+			lastMouse = UIS:GetMouseLocation()
+			input.Changed:Connect(function()
+				if input.UserInputState == Enum.UserInputState.End then
+					dragging = false
+				end
+			end)
+		end
+	end)
+
+	table.insert(conns, RunService.RenderStepped:Connect(function(dt)
+		if not (view.Visible and model) then
+			return
+		end
+		if dragging then
+			if not UIS:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) and not UIS.TouchEnabled then
+				dragging = false
+				return
+			end
+			local m = UIS:GetMouseLocation()
+			local d = m - lastMouse
+			lastMouse = m
+			if d.X ~= 0 or d.Y ~= 0 then
+				yaw -= d.X * 0.01
+				pitch = math.clamp(pitch + d.Y * 0.01, -1.2, 1.2)
+				if spinning then
+					spinning = false
+					refreshSpin()
+				end
+				updateCamera()
+			end
+		elseif spinning then
+			yaw += dt * 0.6
+			updateCamera()
+		end
+	end))
+
+	-- scroll to zoom (only while the mouse is over the viewport)
+	table.insert(conns, UIS.InputChanged:Connect(function(input)
+		if input.UserInputType ~= Enum.UserInputType.MouseWheel or not (view.Visible and model) then
+			return
+		end
+		local m = UIS:GetMouseLocation()
+		local p, sz = viewport.AbsolutePosition, viewport.AbsoluteSize
+		if m.X >= p.X and m.X <= p.X + sz.X and m.Y >= p.Y and m.Y <= p.Y + sz.Y then
+			dist = math.clamp(dist - input.Position.Z * baseDist * 0.1, baseDist * 0.12, baseDist * 2.5)
+			updateCamera()
+		end
+	end))
+
+	spinBtn.MouseButton1Click:Connect(function()
+		spinning = not spinning
+		refreshSpin()
+	end)
+	resetBtn.MouseButton1Click:Connect(resetView)
+
+	local api = {}
+
+	function api.Show()
+		view.Visible = true
+		load()
+	end
+
+	function api.Hide()
+		dragging = false
+		view.Visible = false
+	end
+
+	function api.Destroy()
+		for _, c in ipairs(conns) do
+			c:Disconnect()
+		end
+		table.clear(conns)
+		view:Destroy()
+	end
+
+	backBtn.MouseButton1Click:Connect(function()
+		api.Hide()
+		if cfg.OnBack then
+			cfg.OnBack()
+		end
+	end)
+
+	-- clean up automatically if the host UI is destroyed
+	if cfg.Parent then
+		table.insert(conns, cfg.Parent.Destroying:Connect(function()
+			api.Destroy()
+		end))
+	end
+
+	return api
+end
