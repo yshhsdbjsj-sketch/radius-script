@@ -235,7 +235,7 @@ return function(cfg)
 			end
 			local size = hi - lo
 			focus = (lo + hi) / 2
-			baseDist = (size.Y / (2 * math.tan(math.rad(camera.FieldOfView / 2))) + size.Z / 2) * 0.92
+			baseDist = (size.Y / (2 * math.tan(math.rad(camera.FieldOfView / 2))) + size.Z / 2) * 0.86
 
 			model = built
 			loading = false
