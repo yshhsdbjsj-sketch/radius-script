@@ -82,9 +82,6 @@ return function(cfg)
 		return b
 	end
 
-	local backBtn = mini("Back", 52, 12)
-	local resetBtn = mini("Reset", 52, 70)
-	local spinBtn = mini("Spin: On", 76, 128)
 
 	local divider = Instance.new("Frame")
 	divider.BackgroundColor3 = Color3.fromRGB(38, 38, 42)
@@ -101,7 +98,7 @@ return function(cfg)
 	viewport.BorderSizePixel = 0
 	viewport.Ambient = Color3.fromRGB(150, 150, 158)
 	viewport.LightColor = Color3.fromRGB(255, 255, 255)
-	viewport.Active = true
+	viewport.Active = false
 	viewport.Parent = view
 	addCorner(viewport)
 	addStroke(viewport, STROKE)
@@ -110,17 +107,6 @@ return function(cfg)
 	camera.FieldOfView = 40
 	viewport.CurrentCamera = camera
 	camera.Parent = viewport
-
-	local hint = Instance.new("TextLabel")
-	hint.BackgroundTransparency = 1
-	hint.AnchorPoint = Vector2.new(0.5, 1)
-	hint.Position = UDim2.new(0.5, 0, 1, -6)
-	hint.Size = UDim2.new(1, -16, 0, 14)
-	hint.Font = Enum.Font.GothamMedium
-	hint.Text = "Drag to rotate  -  Scroll to zoom"
-	hint.TextColor3 = Color3.fromRGB(90, 90, 96)
-	hint.TextSize = 11
-	hint.Parent = viewport
 
 	local status = Instance.new("TextLabel")
 	status.BackgroundTransparency = 1
@@ -148,9 +134,7 @@ return function(cfg)
 		viewport.LightDirection = (camera.CFrame.LookVector + Vector3.new(0.35, -0.45, 0)).Unit
 	end
 
-	local function refreshSpin()
-		spinBtn.Text = spinning and "Spin: On" or "Spin: Off"
-	end
+	local function refreshSpin() end
 
 	local function resetView()
 		yaw, pitch, dist = math.pi, 0.1, baseDist
@@ -251,7 +235,7 @@ return function(cfg)
 			end
 			local size = hi - lo
 			focus = (lo + hi) / 2
-			baseDist = size.Y / (2 * math.tan(math.rad(camera.FieldOfView / 2))) + size.Z / 2
+			baseDist = (size.Y / (2 * math.tan(math.rad(camera.FieldOfView / 2))) + size.Z / 2) * 0.8
 
 			model = built
 			loading = false
@@ -260,64 +244,14 @@ return function(cfg)
 		end)
 	end
 
-	-- drag to rotate (polled every frame) + auto spin
-	viewport.InputBegan:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-			dragging = true
-			lastMouse = UIS:GetMouseLocation()
-			input.Changed:Connect(function()
-				if input.UserInputState == Enum.UserInputState.End then
-					dragging = false
-				end
-			end)
-		end
-	end)
-
+	-- auto spin only (no drag, no zoom)
 	table.insert(conns, RunService.RenderStepped:Connect(function(dt)
 		if not (view.Visible and model) then
 			return
 		end
-		if dragging then
-			if not UIS:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) and not UIS.TouchEnabled then
-				dragging = false
-				return
-			end
-			local m = UIS:GetMouseLocation()
-			local d = m - lastMouse
-			lastMouse = m
-			if d.X ~= 0 or d.Y ~= 0 then
-				yaw -= d.X * 0.01
-				pitch = math.clamp(pitch + d.Y * 0.01, -1.2, 1.2)
-				if spinning then
-					spinning = false
-					refreshSpin()
-				end
-				updateCamera()
-			end
-		elseif spinning then
-			yaw += dt * 0.6
-			updateCamera()
-		end
+		yaw += dt * 0.6
+		updateCamera()
 	end))
-
-	-- scroll to zoom (only while the mouse is over the viewport)
-	table.insert(conns, UIS.InputChanged:Connect(function(input)
-		if input.UserInputType ~= Enum.UserInputType.MouseWheel or not (view.Visible and model) then
-			return
-		end
-		local m = UIS:GetMouseLocation()
-		local p, sz = viewport.AbsolutePosition, viewport.AbsoluteSize
-		if m.X >= p.X and m.X <= p.X + sz.X and m.Y >= p.Y and m.Y <= p.Y + sz.Y then
-			dist = math.clamp(dist - input.Position.Z * baseDist * 0.1, baseDist * 0.12, baseDist * 2.5)
-			updateCamera()
-		end
-	end))
-
-	spinBtn.MouseButton1Click:Connect(function()
-		spinning = not spinning
-		refreshSpin()
-	end)
-	resetBtn.MouseButton1Click:Connect(resetView)
 
 	local api = {}
 
@@ -338,13 +272,6 @@ return function(cfg)
 		table.clear(conns)
 		view:Destroy()
 	end
-
-	backBtn.MouseButton1Click:Connect(function()
-		api.Hide()
-		if cfg.OnBack then
-			cfg.OnBack()
-		end
-	end)
 
 	-- clean up automatically if the host UI is destroyed
 	if cfg.Parent then
