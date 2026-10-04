@@ -1,0 +1,222 @@
+-- watermark.lua
+-- usage: local createWatermark = loadstring(game:HttpGet(URL))()(lib)
+--        local watermark = createWatermark()   -- returns { SetVisible, Destroy }
+return function(lib)
+	local Players = lib.Players
+	local TweenService = lib.TweenService
+	local RunService = lib.RunService
+	local addCorner = lib.addCorner
+	local addStroke = lib.addStroke
+	local win = lib.win
+
+	return function()
+		local player = Players.LocalPlayer
+		local MarketplaceService = game:GetService("MarketplaceService")
+
+		local TEXT_DIM = Color3.fromRGB(110, 110, 116)
+		local TEXT_SOFT = Color3.fromRGB(190, 190, 196)
+
+		local gui = Instance.new("ScreenGui")
+		gui.Name = "RadiusWatermark"
+		gui.ResetOnSpawn = false
+		gui.IgnoreGuiInset = true
+		gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+		gui.Parent = player:WaitForChild("PlayerGui")
+
+		-- everything that fades in / out together
+		local tracked = {}
+		local function track(obj, prop, shown)
+			obj[prop] = 1
+			table.insert(tracked, {obj = obj, prop = prop, shown = shown})
+		end
+		local function setShown(show, duration)
+			local info = TweenInfo.new(duration, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+			for _, t in ipairs(tracked) do
+				TweenService:Create(t.obj, info, {[t.prop] = show and t.shown or 1}):Play()
+			end
+		end
+
+		-- card that grows to fit the two rows
+		local card = Instance.new("Frame")
+		card.Name = "Watermark"
+		card.AnchorPoint = Vector2.new(0, 1)
+		local GAP = -50 -- negative = pushed down into the window
+		local wp = win.frame.AbsolutePosition
+		card.Position = UDim2.fromOffset(wp.X, wp.Y - GAP)
+		card.AutomaticSize = Enum.AutomaticSize.XY
+		card.Size = UDim2.fromOffset(0, 0)
+		card.BackgroundColor3 = Color3.fromRGB(18, 18, 21)
+		card.BorderSizePixel = 0
+		card.Parent = gui
+		addCorner(card)
+		track(card, "BackgroundTransparency", 0.12)
+		track(addStroke(card, Color3.fromRGB(52, 52, 58)), "Transparency", 0)
+
+		local padding = Instance.new("UIPadding")
+		padding.PaddingLeft = UDim.new(0, 10)
+		padding.PaddingRight = UDim.new(0, 10)
+		padding.PaddingTop = UDim.new(0, 7)
+		padding.PaddingBottom = UDim.new(0, 7)
+		padding.Parent = card
+
+		local rows = Instance.new("UIListLayout")
+		rows.Padding = UDim.new(0, 4)
+		rows.SortOrder = Enum.SortOrder.LayoutOrder
+		rows.Parent = card
+
+		local function newRow(order)
+			local row = Instance.new("Frame")
+			row.LayoutOrder = order
+			row.BackgroundTransparency = 1
+			row.AutomaticSize = Enum.AutomaticSize.X
+			row.Size = UDim2.fromOffset(0, 16)
+			row.Parent = card
+
+			local layout = Instance.new("UIListLayout")
+			layout.FillDirection = Enum.FillDirection.Horizontal
+			layout.Padding = UDim.new(0, 7)
+			layout.SortOrder = Enum.SortOrder.LayoutOrder
+			layout.VerticalAlignment = Enum.VerticalAlignment.Center
+			layout.Parent = row
+			return row
+		end
+
+		local function seg(row, order, text, color, font)
+			local label = Instance.new("TextLabel")
+			label.LayoutOrder = order
+			label.BackgroundTransparency = 1
+			label.AutomaticSize = Enum.AutomaticSize.X
+			label.Size = UDim2.fromOffset(0, 16)
+			label.Font = font or Enum.Font.GothamMedium
+			label.Text = text
+			label.TextColor3 = color
+			label.TextSize = 13
+			label.Parent = row
+			track(label, "TextTransparency", 0)
+			return label
+		end
+
+		-- row 1: Radius [Beta] | Username | FPS
+		local row1 = newRow(1)
+		seg(row1, 1, "Radius", Color3.fromRGB(245, 245, 248), Enum.Font.GothamBold)
+
+		local badge = Instance.new("Frame")
+		badge.LayoutOrder = 2
+		badge.Size = UDim2.fromOffset(34, 15)
+		badge.BackgroundColor3 = Color3.fromRGB(26, 26, 29)
+		badge.BorderSizePixel = 0
+		badge.Parent = row1
+		addCorner(badge, 3)
+		track(badge, "BackgroundTransparency", 0)
+		track(addStroke(badge, Color3.fromRGB(64, 64, 70)), "Transparency", 0)
+
+		local badgeText = Instance.new("TextLabel")
+		badgeText.BackgroundTransparency = 1
+		badgeText.Size = UDim2.fromScale(1, 1)
+		badgeText.Font = Enum.Font.GothamMedium
+		badgeText.Text = "Beta"
+		badgeText.TextColor3 = Color3.fromRGB(150, 150, 156)
+		badgeText.TextSize = 11
+		badgeText.Parent = badge
+		track(badgeText, "TextTransparency", 0)
+
+		seg(row1, 3, "|", TEXT_DIM)
+		seg(row1, 4, player.Name, TEXT_SOFT)
+		seg(row1, 5, "|", TEXT_DIM)
+		local fpsLabel = seg(row1, 6, "60 FPS", TEXT_SOFT)
+
+		-- row 2: Uptime | Game name | Players
+		local row2 = newRow(2)
+		local uptimeLabel = seg(row2, 1, "0m 00s", TEXT_SOFT)
+		seg(row2, 2, "|", TEXT_DIM)
+		local gameLabel = seg(row2, 3, game.Name, TEXT_SOFT)
+		seg(row2, 4, "|", TEXT_DIM)
+		local playersLabel = seg(row2, 5, "Players", TEXT_SOFT)
+
+		local function shorten(name)
+			if (utf8.len(name) or #name) > 24 then
+				local cut = utf8.offset(name, 25) or 25
+				return name:sub(1, cut - 1) .. "..."
+			end
+			return name
+		end
+		gameLabel.Text = shorten(game.Name)
+
+		task.spawn(function()
+			local ok, info = pcall(function()
+				return MarketplaceService:GetProductInfo(game.PlaceId)
+			end)
+			if ok and info and info.Name and gui.Parent then
+				gameLabel.Text = shorten(info.Name)
+			end
+		end)
+
+		local function formatTime(t)
+			t = math.floor(t)
+			local h = math.floor(t / 3600)
+			local m = math.floor((t % 3600) / 60)
+			local s = t % 60
+			if h > 0 then
+				return string.format("%dh %02dm %02ds", h, m, s)
+			end
+			return string.format("%dm %02ds", m, s)
+		end
+
+		-- live values
+		local smoothDt = 1 / 60
+		local fpsConn = RunService.RenderStepped:Connect(function(dt)
+			smoothDt += (dt - smoothDt) * 0.05
+		end)
+
+		task.spawn(function()
+			while gui.Parent do
+				fpsLabel.Text = math.floor(1 / smoothDt + 0.5) .. " FPS"
+				uptimeLabel.Text = formatTime(workspace.DistributedGameTime)
+				playersLabel.Text = #Players:GetPlayers() .. "/" .. Players.MaxPlayers .. " players"
+				task.wait(0.25)
+			end
+		end)
+
+		-- follow the main window while it is dragged
+		local enabled = true
+		local dragging = false
+		local followConn = RunService.RenderStepped:Connect(function()
+			local p = win.frame.AbsolutePosition
+			card.Position = UDim2.fromOffset(p.X, math.max(p.Y - GAP, card.AbsoluteSize.Y))
+		end)
+
+		setShown(true, 0.5)
+
+		local api = {}
+
+		-- turn the watermark on / off (used by the Settings switch)
+		function api.SetVisible(show)
+			enabled = show
+			if show then
+				card.Visible = true
+			else
+				dragging = false
+			end
+			setShown(show, 0.25)
+			if not show then
+				task.delay(0.3, function()
+					if not enabled then
+						card.Visible = false
+					end
+				end)
+			end
+		end
+
+		function api.Destroy()
+			enabled = false
+			dragging = false
+			setShown(false, 0.3)
+			task.delay(0.35, function()
+				fpsConn:Disconnect()
+				followConn:Disconnect()
+				gui:Destroy()
+			end)
+		end
+		return api
+	end
+end
