@@ -1,0 +1,272 @@
+-- toolstab.lua
+-- loadstring(game:HttpGet(TOOLS_TAB_URL))()(lib)
+-- Returns: builder(opts) → nil
+
+return function(lib)
+	local Players      = lib.Players
+	local TweenService = lib.TweenService
+	local RunService   = lib.RunService
+	local TEXT_MAIN    = lib.TEXT_MAIN
+	local addCorner    = lib.addCorner
+	local addStroke    = lib.addStroke
+	local win          = lib.win
+
+	return function(opts)
+		local pages    = opts.pages
+		local fadeInfo = opts.fadeInfo
+		local slideInfo = opts.slideInfo
+
+		local page  = pages["Tools"]
+		local lp    = Players.LocalPlayer
+
+		local TEXT_DIM  = Color3.fromRGB(130, 130, 136)
+		local TEXT_SOFT = Color3.fromRGB(190, 190, 196)
+		local CARD_BG   = Color3.fromRGB(22, 22, 25)
+
+		-- ============================================================
+		-- empty-state label (shown when no tool is equipped)
+		-- ============================================================
+		local emptyLabel = Instance.new("TextLabel")
+		emptyLabel.BackgroundTransparency = 1
+		emptyLabel.AnchorPoint = Vector2.new(0.5, 0.5)
+		emptyLabel.Position    = UDim2.fromScale(0.5, 0.55)
+		emptyLabel.Size        = UDim2.new(1, -40, 0, 20)
+		emptyLabel.Font        = Enum.Font.GothamMedium
+		emptyLabel.Text        = "No tool equipped"
+		emptyLabel.TextColor3  = TEXT_DIM
+		emptyLabel.TextSize    = 13
+		emptyLabel.Visible     = true
+		emptyLabel.Parent      = page
+
+		-- ============================================================
+		-- viewport card
+		-- ============================================================
+		local card = Instance.new("Frame")
+		card.Name             = "ToolViewport"
+		card.Position         = UDim2.fromOffset(20, 66)
+		card.Size             = UDim2.new(1, -40, 1, -82)
+		card.BackgroundColor3 = CARD_BG
+		card.BorderSizePixel  = 0
+		card.Visible          = false
+		card.Parent           = page
+		addCorner(card)
+		addStroke(card, Color3.fromRGB(42, 42, 47))
+
+		local vp = Instance.new("ViewportFrame")
+		vp.BackgroundTransparency = 1
+		vp.BorderSizePixel        = 0
+		vp.Size                   = UDim2.fromScale(1, 1)
+		vp.LightColor             = Color3.fromRGB(220, 220, 228)
+		vp.LightDirection         = Vector3.new(-1, -2, -1)
+		vp.Ambient                = Color3.fromRGB(80, 80, 88)
+		vp.Parent                 = card
+
+		local worldModel = Instance.new("WorldModel")
+		worldModel.Parent = vp
+
+		local vpCam = Instance.new("Camera")
+		vpCam.Parent  = vp
+		vp.CurrentCamera = vpCam
+
+		-- ============================================================
+		-- tool name + sub-label at the bottom of the card
+		-- ============================================================
+		local nameLabel = Instance.new("TextLabel")
+		nameLabel.BackgroundTransparency = 1
+		nameLabel.AnchorPoint  = Vector2.new(0.5, 1)
+		nameLabel.Position     = UDim2.new(0.5, 0, 1, -28)
+		nameLabel.Size         = UDim2.new(1, -20, 0, 22)
+		nameLabel.Font         = Enum.Font.GothamBold
+		nameLabel.Text         = ""
+		nameLabel.TextColor3   = TEXT_MAIN
+		nameLabel.TextSize     = 15
+		nameLabel.TextTruncate = Enum.TextTruncate.AtEnd
+		nameLabel.Parent       = card
+
+		local subLabel = Instance.new("TextLabel")
+		subLabel.BackgroundTransparency = 1
+		subLabel.AnchorPoint  = Vector2.new(0.5, 1)
+		subLabel.Position     = UDim2.new(0.5, 0, 1, -10)
+		subLabel.Size         = UDim2.new(1, -20, 0, 16)
+		subLabel.Font         = Enum.Font.Gotham
+		subLabel.Text         = ""
+		subLabel.TextColor3   = TEXT_DIM
+		subLabel.TextSize     = 12
+		subLabel.TextTruncate = Enum.TextTruncate.AtEnd
+		subLabel.Parent       = card
+
+		-- ============================================================
+		-- gradient overlay at the bottom so labels read cleanly
+		-- ============================================================
+		local grad = Instance.new("Frame")
+		grad.AnchorPoint      = Vector2.new(0, 1)
+		grad.Position         = UDim2.fromScale(0, 1)
+		grad.Size             = UDim2.new(1, 0, 0, 60)
+		grad.BackgroundColor3 = CARD_BG
+		grad.BorderSizePixel  = 0
+		grad.ZIndex           = 2
+		grad.Parent           = card
+		local gradCorner = Instance.new("UICorner")
+		gradCorner.CornerRadius = UDim.new(0, 5)
+		gradCorner.Parent = grad
+		local gradGrad = Instance.new("UIGradient")
+		gradGrad.Rotation = 90
+		gradGrad.Transparency = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 1),
+			NumberSequenceKeypoint.new(1, 0),
+		})
+		gradGrad.Parent = grad
+		nameLabel.ZIndex = 3
+		subLabel.ZIndex  = 3
+
+		-- ============================================================
+		-- camera orbit helpers
+		-- ============================================================
+		local angle   = 0
+		local ORBIT_R = 4   -- camera distance (adjusted per tool size)
+		local ORBIT_Y = 1.2 -- height above the tool's centre
+
+		local function fitCamera(clone)
+			-- compute bounding box of the cloned tool
+			local minP =  Vector3.new(math.huge,  math.huge,  math.huge)
+			local maxP =  Vector3.new(-math.huge, -math.huge, -math.huge)
+			for _, part in ipairs(clone:GetDescendants()) do
+				if part:IsA("BasePart") then
+					local s = part.Size / 2
+					local cf = part.CFrame
+					for _, corner in ipairs({
+						Vector3.new( s.X,  s.Y,  s.Z), Vector3.new(-s.X,  s.Y,  s.Z),
+						Vector3.new( s.X, -s.Y,  s.Z), Vector3.new(-s.X, -s.Y,  s.Z),
+						Vector3.new( s.X,  s.Y, -s.Z), Vector3.new(-s.X,  s.Y, -s.Z),
+						Vector3.new( s.X, -s.Y, -s.Z), Vector3.new(-s.X, -s.Y, -s.Z),
+					}) do
+						local w = (cf * CFrame.new(corner)).Position
+						minP = Vector3.new(math.min(minP.X,w.X), math.min(minP.Y,w.Y), math.min(minP.Z,w.Z))
+						maxP = Vector3.new(math.max(maxP.X,w.X), math.max(maxP.Y,w.Y), math.max(maxP.Z,w.Z))
+					end
+				end
+			end
+			local size = (maxP - minP).Magnitude
+			ORBIT_R = math.max(2.5, size * 1.4)
+			ORBIT_Y = (minP.Y + maxP.Y) / 2 + size * 0.12
+		end
+
+		-- ============================================================
+		-- load / clear tool clone
+		-- ============================================================
+		local toolClone
+		local toolCentre = Vector3.zero
+		local orbitConn
+
+		local function clearTool()
+			if orbitConn then orbitConn:Disconnect(); orbitConn = nil end
+			if toolClone then toolClone:Destroy(); toolClone = nil end
+			card.Visible      = false
+			emptyLabel.Visible = true
+			nameLabel.Text    = ""
+			subLabel.Text     = ""
+		end
+
+		local function loadTool(tool)
+			clearTool()
+			if not tool then return end
+
+			-- clone into WorldModel (exclude scripts so nothing fires)
+			local clone = Instance.new("Model")
+			for _, child in ipairs(tool:GetChildren()) do
+				if not child:IsA("Script") and not child:IsA("LocalScript")
+					and not child:IsA("ModuleScript") then
+					child:Clone().Parent = clone
+				end
+			end
+			if not next(clone:GetChildren()) then
+				clone:Destroy(); return
+			end
+
+			-- zero out velocities and anchor everything
+			for _, part in ipairs(clone:GetDescendants()) do
+				if part:IsA("BasePart") then
+					part.Anchored   = true
+					part.CastShadow = false
+					part.Velocity   = Vector3.zero
+					part.RotVelocity = Vector3.zero
+				end
+			end
+
+			clone.Parent = worldModel
+			toolClone    = clone
+
+			-- centre the model at the origin
+			local ok, centre = pcall(function() return clone:GetBoundingBox() end)
+			if ok then
+				toolCentre = centre.Position
+				-- shift everything so the model is centred
+				local offset = CFrame.new(-toolCentre)
+				for _, part in ipairs(clone:GetDescendants()) do
+					if part:IsA("BasePart") then
+						part.CFrame = offset * part.CFrame
+					end
+				end
+				toolCentre = Vector3.zero
+			end
+
+			fitCamera(clone)
+
+			card.Visible       = true
+			emptyLabel.Visible = false
+			nameLabel.Text     = tool.Name
+			subLabel.Text      = tool.ToolTip ~= "" and tool.ToolTip or "Equipped tool"
+
+			-- orbit animation
+			angle = 0
+			orbitConn = RunService.RenderStepped:Connect(function(dt)
+				angle += dt * 0.6
+				local x = toolCentre.X + math.cos(angle) * ORBIT_R
+				local z = toolCentre.Z + math.sin(angle) * ORBIT_R
+				local eye    = Vector3.new(x, ORBIT_Y, z)
+				local target = Vector3.new(toolCentre.X, ORBIT_Y * 0.5, toolCentre.Z)
+				vpCam.CFrame = CFrame.lookAt(eye, target)
+			end)
+		end
+
+		-- ============================================================
+		-- watch for equip / unequip
+		-- ============================================================
+		local function getEquipped(char)
+			return char and char:FindFirstChildOfClass("Tool")
+		end
+
+		local charConns = {}
+
+		local function watchChar(char)
+			for _, c in ipairs(charConns) do c:Disconnect() end
+			charConns = {}
+
+			if not char then clearTool(); return end
+
+			loadTool(getEquipped(char))
+
+			table.insert(charConns, char.ChildAdded:Connect(function(child)
+				if child:IsA("Tool") then loadTool(child) end
+			end))
+			table.insert(charConns, char.ChildRemoved:Connect(function(child)
+				if child:IsA("Tool") then
+					-- slight delay so the new tool (if swapping) can arrive first
+					task.delay(0.05, function()
+						local newTool = getEquipped(char)
+						if newTool then loadTool(newTool) else clearTool() end
+					end)
+				end
+			end))
+		end
+
+		watchChar(lp.Character)
+		local charAddedConn = lp.CharacterAdded:Connect(watchChar)
+
+		win.onClose(function()
+			charAddedConn:Disconnect()
+			for _, c in ipairs(charConns) do c:Disconnect() end
+			clearTool()
+		end)
+	end
+end
