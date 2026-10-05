@@ -6,6 +6,7 @@ return function(cfg)
 
 	local RADIUS = cfg.Radius or 5
 	local Z = cfg.ZIndex or 7
+	local ZOOM_OUT = cfg.ZoomOut or 1.8 -- was 0.86 (bigger = further away)
 	local userId = cfg.UserId or Players.LocalPlayer.UserId
 	local tweenInfo = TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 
@@ -235,7 +236,7 @@ return function(cfg)
 			end
 			local size = hi - lo
 			focus = (lo + hi) / 2
-			baseDist = (size.Y / (2 * math.tan(math.rad(camera.FieldOfView / 2))) + size.Z / 2) * 0.86
+			baseDist = (size.Y / (2 * math.tan(math.rad(camera.FieldOfView / 2))) + size.Z / 2) * ZOOM_OUT
 
 			model = built
 			loading = false
