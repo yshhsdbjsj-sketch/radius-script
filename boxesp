@@ -31,12 +31,24 @@ return function(lib)
 	}
 	local R6_PARTS = {"Head", "Torso", "Left Arm", "Right Arm", "Left Leg", "Right Leg"}
 
-	-- screen-space bounding box of a character, projected through any camera
-	local function getBounds(char, camera)
+	-- screen-space bounding box of a character.
+	-- vpSize == nil -> normal camera, uses WorldToViewportPoint (real players)
+	-- vpSize given  -> ViewportFrame camera, projected manually with that frame size
+	--                  (a ViewportFrame camera's ViewportSize is NOT the frame size,
+	--                   which is why WorldToViewportPoint put the box in the corner)
+	local function getBounds(char, camera, vpSize)
 		local parts = char:FindFirstChild("UpperTorso") and R15_PARTS or R6_PARTS
 		local minX, minY = math.huge, math.huge
 		local maxX, maxY = -math.huge, -math.huge
 		local any = false
+
+		local camCF, tanHalf, aspect
+		if vpSize then
+			camCF = camera.CFrame
+			tanHalf = math.tan(math.rad(camera.FieldOfView) / 2)
+			aspect = vpSize.X / vpSize.Y
+		end
+
 		for _, name in ipairs(parts) do
 			local part = char:FindFirstChild(name)
 			if part then
@@ -45,13 +57,25 @@ return function(lib)
 					for iy = -1, 1, 2 do
 						for iz = -1, 1, 2 do
 							local world = cf:PointToWorldSpace(Vector3.new(half.X * ix, half.Y * iy, half.Z * iz))
-							local sp, onScreen = camera:WorldToViewportPoint(world)
-							if onScreen then
+							local x, y, visible
+							if vpSize then
+								local rel = camCF:PointToObjectSpace(world)
+								if rel.Z < -0.05 then
+									local d = -rel.Z * tanHalf
+									x = (rel.X / (d * aspect) * 0.5 + 0.5) * vpSize.X
+									y = (0.5 - rel.Y / d * 0.5) * vpSize.Y
+									visible = true
+								end
+							else
+								local sp, onScreen = camera:WorldToViewportPoint(world)
+								x, y, visible = sp.X, sp.Y, onScreen
+							end
+							if visible then
 								any = true
-								if sp.X < minX then minX = sp.X end
-								if sp.Y < minY then minY = sp.Y end
-								if sp.X > maxX then maxX = sp.X end
-								if sp.Y > maxY then maxY = sp.Y end
+								if x < minX then minX = x end
+								if y < minY then minY = y end
+								if x > maxX then maxX = x end
+								if y > maxY then maxY = y end
 							end
 						end
 					end
@@ -179,7 +203,13 @@ return function(lib)
 				preview.Visible = false
 				return
 			end
-			local minX, minY, maxX, maxY = getBounds(model, camera)
+			local uiScale = popup:FindFirstChildOfClass("UIScale")
+			local vpSize = viewport.AbsoluteSize / (uiScale and uiScale.Scale or 1)
+			if vpSize.X < 1 or vpSize.Y < 1 then
+				preview.Visible = false
+				return
+			end
+			local minX, minY, maxX, maxY = getBounds(model, camera, vpSize)
 			if not minX then
 				preview.Visible = false
 				return
