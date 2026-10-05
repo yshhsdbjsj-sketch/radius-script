@@ -508,12 +508,14 @@ return function(lib)
 		-- ====================================================
 		-- features
 		-- ====================================================
-		local noclip = {enabled = false, active = false, hasKey = true}
-		local infJump = {enabled = false, active = false, hasKey = false}
-		local speed = {enabled = false, active = false, hasKey = true}
-		local flight = {enabled = false, active = false, hasKey = true}
-		local jump = {enabled = false, active = false, hasKey = false}
-		local gravity = {enabled = false, active = false, hasKey = false}
+		local noclip   = {enabled = false, active = false, hasKey = true}
+		local infJump  = {enabled = false, active = false, hasKey = false}
+		local speed    = {enabled = false, active = false, hasKey = true}
+		local flight   = {enabled = false, active = false, hasKey = true}
+		local jump     = {enabled = false, active = false, hasKey = false}
+		local gravity  = {enabled = false, active = false, hasKey = false}
+		local noSlow   = {enabled = false, active = false, hasKey = false}
+		local noJumpCD = {enabled = false, active = false, hasKey = false}
 		local keyed = {noclip, speed, flight}
 
 		local speedMethod, speedSlider
@@ -614,6 +616,44 @@ return function(lib)
 					origGravity = workspace.Gravity
 				elseif origGravity ~= nil then
 					workspace.Gravity = origGravity
+				end
+			end
+		end
+
+		-- No Slowdown (switch-only)
+		do
+			local card = newCard(7)
+			addHeader(card, noSlow, "No Slowdown")
+			noSlow.onChange = function(active)
+				if not active then
+					noSlow._baseSpeed = nil
+				end
+			end
+		end
+
+		-- No Jump Cooldown (switch-only)
+		local jumpCDStateConn
+		do
+			local card = newCard(8)
+			addHeader(card, noJumpCD, "No Jump Cooldown")
+			noJumpCD.onChange = function(active)
+				if jumpCDStateConn then
+					jumpCDStateConn:Disconnect()
+					jumpCDStateConn = nil
+				end
+				if active then
+					local _, hum = getChar()
+					if hum then
+						jumpCDStateConn = hum.StateChanged:Connect(function(_, new)
+							if new == Enum.HumanoidStateType.Landed then
+								task.defer(function()
+									if noJumpCD.active and hum and hum.Parent then
+										hum:ChangeState(Enum.HumanoidStateType.Running)
+									end
+								end)
+							end
+						end)
+					end
 				end
 			end
 		end
@@ -801,6 +841,18 @@ return function(lib)
 				jumpBoosted = false
 			end
 
+			-- No Slowdown: remember the intended WalkSpeed when first enabled, then restore
+			-- it every frame if the game lowers it (reload/crouch/shoot penalties).
+			if noSlow.active then
+				if not noSlow._baseSpeed then
+					noSlow._baseSpeed = hum.WalkSpeed
+				elseif hum.WalkSpeed < noSlow._baseSpeed then
+					hum.WalkSpeed = noSlow._baseSpeed
+				else
+					noSlow._baseSpeed = hum.WalkSpeed -- track intentional speed changes
+				end
+			end
+
 			local wantSlip = speed.active and not flight.active and speedMethod.Get() == "Slippery"
 			if wantSlip and not slipApplied then
 				applyFriction(char)
@@ -816,19 +868,41 @@ return function(lib)
 		end)
 
 		-- a respawn replaces every part, so drop the old bookkeeping
-		local charConn = LocalPlayer.CharacterAdded:Connect(function()
+		local charConn = LocalPlayer.CharacterAdded:Connect(function(char)
 			restoreFriction()
 			table.clear(noclipParts)
 			jumpBoosted = false
+			noSlow._baseSpeed = nil
+
+			-- re-wire No Jump Cooldown to the new humanoid
+			if jumpCDStateConn then
+				jumpCDStateConn:Disconnect()
+				jumpCDStateConn = nil
+			end
+			if noJumpCD.active then
+				local hum = char:WaitForChild("Humanoid", 5)
+				if hum then
+					jumpCDStateConn = hum.StateChanged:Connect(function(_, new)
+						if new == Enum.HumanoidStateType.Landed then
+							task.defer(function()
+								if noJumpCD.active and hum and hum.Parent then
+									hum:ChangeState(Enum.HumanoidStateType.Running)
+								end
+							end)
+						end
+					end)
+				end
+			end
 		end)
 
 		-- ====================================================
 		-- cleanup
 		-- ====================================================
 		local function destroy()
-			for _, f in ipairs({noclip, infJump, speed, flight, jump, gravity}) do
+			for _, f in ipairs({noclip, infJump, speed, flight, jump, gravity, noSlow, noJumpCD}) do
 				setActive(f, false)
 			end
+			if jumpCDStateConn then jumpCDStateConn:Disconnect(); jumpCDStateConn = nil end
 			restoreFriction()
 			restoreCollisions()
 			jumpConn:Disconnect()
