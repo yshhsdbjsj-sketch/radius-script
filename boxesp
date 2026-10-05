@@ -236,6 +236,12 @@ return function(lib)
 		local h, s, v = 0, 0, 180 / 255 -- default color (180, 180, 180)
 		local color = Color3.fromHSV(h, s, v)
 		local styleVersion = 0
+		local alpha = 1 -- 1 = opaque, 0 = invisible
+		-- set to true if your executor's Drawing Transparency is reversed (0 = opaque)
+		local DRAWING_ALPHA_INVERTED = false
+		local function drawingAlpha()
+			return DRAWING_ALPHA_INVERTED and (1 - alpha) or alpha
+		end
 
 		local hasDrawing = typeof(Drawing) == "table" or (Drawing ~= nil and Drawing.new ~= nil)
 		if not hasDrawing then
@@ -450,13 +456,56 @@ return function(lib)
 		hueHit.ZIndex = 5
 		hueHit.Parent = hueFrame
 
+		-- ---------- alpha (transparency) bar ----------
+		local alphaFrame = Instance.new("Frame")
+		alphaFrame.Name = "Alpha"
+		alphaFrame.Position = UDim2.fromOffset(194, 44)
+		alphaFrame.Size = UDim2.fromOffset(14, 92)
+		alphaFrame.BackgroundColor3 = Color3.fromRGB(52, 52, 58)
+		alphaFrame.BorderSizePixel = 0
+		alphaFrame.Parent = settings
+		addCorner(alphaFrame, 4)
+		addStroke(alphaFrame, FIELD_STROKE)
+
+		local alphaFill = Instance.new("Frame")
+		alphaFill.Size = UDim2.fromScale(1, 1)
+		alphaFill.BackgroundColor3 = color
+		alphaFill.BorderSizePixel = 0
+		alphaFill.Parent = alphaFrame
+		addCorner(alphaFill, 4)
+		local alphaGradient = Instance.new("UIGradient")
+		alphaGradient.Rotation = 90
+		alphaGradient.Transparency = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 0),
+			NumberSequenceKeypoint.new(1, 0.95),
+		})
+		alphaGradient.Parent = alphaFill
+
+		local alphaCursor = Instance.new("Frame")
+		alphaCursor.AnchorPoint = Vector2.new(0.5, 0.5)
+		alphaCursor.Size = UDim2.new(1, 6, 0, 4)
+		alphaCursor.BackgroundColor3 = Color3.new(1, 1, 1)
+		alphaCursor.BorderSizePixel = 0
+		alphaCursor.ZIndex = 4
+		alphaCursor.Parent = alphaFrame
+		addCorner(alphaCursor, 2)
+		addStroke(alphaCursor, Color3.fromRGB(20, 20, 23))
+
+		local alphaHit = Instance.new("TextButton")
+		alphaHit.Size = UDim2.fromScale(1, 1)
+		alphaHit.BackgroundTransparency = 1
+		alphaHit.AutoButtonColor = false
+		alphaHit.Text = ""
+		alphaHit.ZIndex = 5
+		alphaHit.Parent = alphaFrame
+
 		-- ---------- style buttons ----------
-		smallLabel("STYLE", 204, 42)
+		smallLabel("STYLE", 226, 42)
 
 		local styleRow = Instance.new("Frame")
 		styleRow.BackgroundTransparency = 1
-		styleRow.Position = UDim2.fromOffset(204, 60)
-		styleRow.Size = UDim2.new(1, -218, 0, 26)
+		styleRow.Position = UDim2.fromOffset(226, 60)
+		styleRow.Size = UDim2.new(1, -240, 0, 26)
 		styleRow.Parent = settings
 
 		local styleLayout = Instance.new("UIListLayout")
@@ -507,12 +556,12 @@ return function(lib)
 		refreshStyleButtons(false)
 
 		-- ---------- color preview + hex ----------
-		smallLabel("COLOR", 204, 94)
+		smallLabel("COLOR", 226, 94)
 
 		local colorRow = Instance.new("Frame")
 		colorRow.BackgroundTransparency = 1
-		colorRow.Position = UDim2.fromOffset(204, 110)
-		colorRow.Size = UDim2.new(1, -218, 0, 26)
+		colorRow.Position = UDim2.fromOffset(226, 110)
+		colorRow.Size = UDim2.new(1, -240, 0, 26)
 		colorRow.Parent = settings
 
 		local swatch = Instance.new("Frame")
@@ -555,6 +604,9 @@ return function(lib)
 			svCursor.Position = UDim2.fromScale(s, 1 - v)
 			hueCursor.Position = UDim2.fromScale(0.5, h)
 			swatch.BackgroundColor3 = color
+			swatch.BackgroundTransparency = 1 - alpha
+			alphaFill.BackgroundColor3 = color
+			alphaCursor.Position = UDim2.fromScale(0.5, 1 - alpha)
 			if not hexFocused then
 				hexBox.Text = toHex(color)
 			end
@@ -580,19 +632,47 @@ return function(lib)
 		end)
 
 		-- ---------- dragging the picker ----------
+		-- the pointer coordinate space differs between executors/GUI-inset settings,
+		-- so on press we pick the candidate that actually lies inside the pressed element
+		-- and keep the difference as a calibration offset
+		local GuiService = game:GetService("GuiService")
 		local dragTarget
+		local dragHit
+		local calib = Vector2.new(0, 0)
+
+		local function inside(pos, hit)
+			local ap, as = hit.AbsolutePosition, hit.AbsoluteSize
+			return pos.X >= ap.X - 1 and pos.X <= ap.X + as.X + 1 and pos.Y >= ap.Y - 1 and pos.Y <= ap.Y + as.Y + 1
+		end
+
+		local function calibrate(input, hit)
+			local base = UserInputService:GetMouseLocation()
+			local inset = Vector2.new(0, 0)
+			pcall(function() inset = GuiService:GetGuiInset() end)
+			local ip = Vector2.new(input.Position.X, input.Position.Y)
+			local candidates = {base, ip, ip + inset, base - inset}
+			calib = Vector2.new(0, 0)
+			for _, c in ipairs(candidates) do
+				if inside(c, hit) then
+					calib = c - base
+					return
+				end
+			end
+		end
+
 		local function applyDrag()
 			if not dragTarget then
 				return
 			end
-			local m = UserInputService:GetMouseLocation()
+			local m = UserInputService:GetMouseLocation() + calib
+			local ap, as = dragHit.AbsolutePosition, dragHit.AbsoluteSize
 			if dragTarget == "sv" then
-				local ap, as = svHit.AbsolutePosition, svHit.AbsoluteSize
 				s = math.clamp((m.X - ap.X) / as.X, 0, 1)
 				v = 1 - math.clamp((m.Y - ap.Y) / as.Y, 0, 1)
-			else
-				local ap, as = hueHit.AbsolutePosition, hueHit.AbsoluteSize
+			elseif dragTarget == "hue" then
 				h = math.clamp((m.Y - ap.Y) / as.Y, 0, 0.999)
+			else
+				alpha = 1 - math.clamp((m.Y - ap.Y) / as.Y, 0, 1)
 			end
 			refreshColor()
 		end
@@ -601,18 +681,19 @@ return function(lib)
 			return input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch
 		end
 
-		svHit.InputBegan:Connect(function(input)
-			if isPress(input) then
-				dragTarget = "sv"
-				applyDrag()
-			end
-		end)
-		hueHit.InputBegan:Connect(function(input)
-			if isPress(input) then
-				dragTarget = "hue"
-				applyDrag()
-			end
-		end)
+		local function bindDrag(hit, target)
+			hit.InputBegan:Connect(function(input)
+				if isPress(input) then
+					dragTarget = target
+					dragHit = hit
+					calibrate(input, hit)
+					applyDrag()
+				end
+			end)
+		end
+		bindDrag(svHit, "sv")
+		bindDrag(hueHit, "hue")
+		bindDrag(alphaHit, "alpha")
 		local moveConn = UserInputService.InputChanged:Connect(function(input)
 			if dragTarget and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
 				applyDrag()
@@ -694,6 +775,7 @@ return function(lib)
 				local dx, dy = sg[3] - sg[1], sg[4] - sg[2]
 				local len = math.sqrt(dx * dx + dy * dy)
 				l.BackgroundColor3 = color
+				l.BackgroundTransparency = 1 - alpha
 				l.Position = UDim2.fromOffset((sg[1] + sg[3]) / 2, (sg[2] + sg[4]) / 2)
 				l.Size = UDim2.fromOffset(len + THICKNESS, THICKNESS)
 				l.Rotation = math.deg(math.atan2(dy, dx))
@@ -733,6 +815,7 @@ return function(lib)
 		local function newLine()
 			local l = Drawing.new("Line")
 			l.Color = color
+			l.Transparency = drawingAlpha()
 			l.Thickness = THICKNESS
 			l.Visible = false
 			return l
@@ -776,6 +859,7 @@ return function(lib)
 				rec.version = styleVersion
 				for _, l in ipairs(lines) do
 					l.Color = color
+					l.Transparency = drawingAlpha()
 				end
 			end
 			for i = 1, count do
@@ -867,6 +951,10 @@ return function(lib)
 			SetColor = function(c)
 				h, s, v = rgbToHsv(c)
 				h = math.min(h, 0.999)
+				refreshColor()
+			end,
+			SetAlpha = function(a)
+				alpha = math.clamp(a, 0, 1)
 				refreshColor()
 			end,
 			Destroy = destroy,
