@@ -1,108 +1,313 @@
-local Players     = game:GetService("Players")
-local RunService  = game:GetService("RunService")
-local LocalPlayer = Players.LocalPlayer
-local Camera      = workspace.CurrentCamera
+-- boxesp module (Visuals tab)
+-- usage in the main script:
+--   local buildBoxEsp = loadstring(game:HttpGet(BOXESP_URL))()(lib)
+--   local boxEsp = buildBoxEsp({pages = pages, fadeInfo = fadeInfo, slideInfo = slideInfo, popup = popup})
+--
+-- behaviour:
+--   * "Box Esp" switch on the Visuals page
+--   * while the menu is OPEN the box only shows on the 3D avatar preview
+--   * when the menu is HIDDEN (menu toggle key) the box draws on every player
 
-local boxes = {}
+return function(lib)
+	local Players = lib.Players
+	local TweenService = lib.TweenService
+	local RunService = lib.RunService
+	local win = lib.win
+	local addCorner, addStroke = lib.addCorner, lib.addStroke
+	local TEXT_MAIN = lib.TEXT_MAIN
 
-local R15_PARTS = {
-    "Head","UpperTorso","LowerTorso",
-    "LeftUpperArm","RightUpperArm","LeftLowerArm","RightLowerArm",
-    "LeftHand","RightHand",
-    "LeftUpperLeg","RightUpperLeg","LeftLowerLeg","RightLowerLeg",
-    "LeftFoot","RightFoot"
-}
-local R6_PARTS = {
-    "Head","Torso","Left Arm","Right Arm","Left Leg","Right Leg"
-}
+	local LocalPlayer = Players.LocalPlayer
 
-local function newLine()
-    local l = Drawing.new("Line")
-    l.Color     = Color3.fromRGB(180, 180, 180)
-    l.Thickness = 1.5
-    l.Visible   = false
-    return l
+	local ESP_COLOR = Color3.fromRGB(180, 180, 180)
+	local ESP_THICKNESS = 1.5
+	local PAD = 2
+
+	local R15_PARTS = {
+		"Head", "UpperTorso", "LowerTorso",
+		"LeftUpperArm", "RightUpperArm", "LeftLowerArm", "RightLowerArm",
+		"LeftHand", "RightHand",
+		"LeftUpperLeg", "RightUpperLeg", "LeftLowerLeg", "RightLowerLeg",
+		"LeftFoot", "RightFoot",
+	}
+	local R6_PARTS = {"Head", "Torso", "Left Arm", "Right Arm", "Left Leg", "Right Leg"}
+
+	-- screen-space bounding box of a character, projected through any camera
+	local function getBounds(char, camera)
+		local parts = char:FindFirstChild("UpperTorso") and R15_PARTS or R6_PARTS
+		local minX, minY = math.huge, math.huge
+		local maxX, maxY = -math.huge, -math.huge
+		local any = false
+		for _, name in ipairs(parts) do
+			local part = char:FindFirstChild(name)
+			if part then
+				local cf, half = part.CFrame, part.Size / 2
+				for ix = -1, 1, 2 do
+					for iy = -1, 1, 2 do
+						for iz = -1, 1, 2 do
+							local world = cf:PointToWorldSpace(Vector3.new(half.X * ix, half.Y * iy, half.Z * iz))
+							local sp, onScreen = camera:WorldToViewportPoint(world)
+							if onScreen then
+								any = true
+								if sp.X < minX then minX = sp.X end
+								if sp.Y < minY then minY = sp.Y end
+								if sp.X > maxX then maxX = sp.X end
+								if sp.Y > maxY then maxY = sp.Y end
+							end
+						end
+					end
+				end
+			end
+		end
+		if any then
+			return minX, minY, maxX, maxY
+		end
+	end
+
+	return function(ctx)
+		local page = ctx.pages["Visuals"]
+		local fadeInfo = ctx.fadeInfo
+		local popup = ctx.popup
+
+		local enabled = false
+		local hasDrawing = typeof(Drawing) == "table" or (Drawing ~= nil and Drawing.new ~= nil)
+		if not hasDrawing then
+			warn("[boxesp] Drawing library not available - only the preview will work")
+		end
+
+		-- ====================================================
+		-- Visuals page row: label + switch
+		-- ====================================================
+		local row = Instance.new("Frame")
+		row.Name = "BoxEspRow"
+		row.Position = UDim2.fromOffset(20, 66)
+		row.Size = UDim2.new(1, -40, 0, 48)
+		row.BackgroundColor3 = Color3.fromRGB(28, 28, 32)
+		row.BorderSizePixel = 0
+		row.Parent = page
+		addCorner(row)
+		addStroke(row, Color3.fromRGB(42, 42, 47))
+
+		local label = Instance.new("TextLabel")
+		label.BackgroundTransparency = 1
+		label.Position = UDim2.fromOffset(16, 0)
+		label.Size = UDim2.new(0.5, 0, 1, 0)
+		label.Font = Enum.Font.GothamMedium
+		label.Text = "Box Esp"
+		label.TextColor3 = TEXT_MAIN
+		label.TextSize = 14
+		label.TextXAlignment = Enum.TextXAlignment.Left
+		label.Parent = row
+
+		local ON_TRACK = Color3.fromRGB(225, 225, 232)
+		local OFF_TRACK = Color3.fromRGB(44, 44, 50)
+		local ON_KNOB = Color3.fromRGB(22, 22, 25)
+		local OFF_KNOB = Color3.fromRGB(140, 140, 146)
+
+		local switch = Instance.new("TextButton")
+		switch.Name = "BoxEspSwitch"
+		switch.AnchorPoint = Vector2.new(1, 0.5)
+		switch.Position = UDim2.new(1, -12, 0.5, 0)
+		switch.Size = UDim2.fromOffset(46, 24)
+		switch.AutoButtonColor = false
+		switch.Text = ""
+		switch.BorderSizePixel = 0
+		switch.Parent = row
+		addCorner(switch, 7)
+		local switchStroke = addStroke(switch, Color3.fromRGB(60, 60, 66))
+
+		local knob = Instance.new("Frame")
+		knob.AnchorPoint = Vector2.new(0, 0.5)
+		knob.Size = UDim2.fromOffset(18, 18)
+		knob.BorderSizePixel = 0
+		knob.Parent = switch
+		addCorner(knob, 5)
+
+		local function applySwitch(animate)
+			local info = animate and fadeInfo or TweenInfo.new(0)
+			TweenService:Create(switch, info, {BackgroundColor3 = enabled and ON_TRACK or OFF_TRACK}):Play()
+			TweenService:Create(knob, info, {
+				BackgroundColor3 = enabled and ON_KNOB or OFF_KNOB,
+				Position = UDim2.new(0, enabled and 25 or 3, 0.5, 0),
+			}):Play()
+		end
+		applySwitch(false)
+
+		switch.MouseEnter:Connect(function()
+			TweenService:Create(switchStroke, fadeInfo, {Color = Color3.fromRGB(110, 110, 120)}):Play()
+		end)
+		switch.MouseLeave:Connect(function()
+			TweenService:Create(switchStroke, fadeInfo, {Color = Color3.fromRGB(60, 60, 66)}):Play()
+		end)
+
+		-- ====================================================
+		-- preview box on the 3D avatar render
+		-- ====================================================
+		local previewViewport
+		local preview = Instance.new("Frame")
+		preview.Name = "BoxEspPreview"
+		preview.BackgroundTransparency = 1
+		preview.BorderSizePixel = 0
+		preview.Active = false
+		preview.Visible = false
+		preview.ZIndex = 20
+		local previewStroke = Instance.new("UIStroke")
+		previewStroke.Color = ESP_COLOR
+		previewStroke.Thickness = ESP_THICKNESS
+		previewStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+		previewStroke.Parent = preview
+
+		local function findViewport()
+			if previewViewport and previewViewport.Parent then
+				return previewViewport
+			end
+			previewViewport = popup and popup:FindFirstChildWhichIsA("ViewportFrame", true) or nil
+			if previewViewport then
+				preview.Parent = previewViewport
+			end
+			return previewViewport
+		end
+
+		local function updatePreview()
+			local viewport = findViewport()
+			if not (enabled and popup and popup.Visible and viewport) then
+				preview.Visible = false
+				return
+			end
+			local camera = viewport.CurrentCamera
+			local model = viewport:FindFirstChildOfClass("Model")
+			if not (camera and model) then
+				preview.Visible = false
+				return
+			end
+			local minX, minY, maxX, maxY = getBounds(model, camera)
+			if not minX then
+				preview.Visible = false
+				return
+			end
+			preview.Position = UDim2.fromOffset(minX - PAD, minY - PAD)
+			preview.Size = UDim2.fromOffset(maxX - minX + PAD * 2, maxY - minY + PAD * 2)
+			preview.Visible = true
+		end
+
+		-- ====================================================
+		-- real ESP (only while the menu is hidden)
+		-- ====================================================
+		local boxes = {} -- [player] = {line, line, line, line}
+
+		local function newLine()
+			local l = Drawing.new("Line")
+			l.Color = ESP_COLOR
+			l.Thickness = ESP_THICKNESS
+			l.Visible = false
+			return l
+		end
+
+		local function removeBox(player)
+			local lines = boxes[player]
+			if not lines then
+				return
+			end
+			for _, l in ipairs(lines) do
+				pcall(function() l:Remove() end)
+			end
+			boxes[player] = nil
+		end
+
+		local function getBox(player)
+			local lines = boxes[player]
+			if not lines then
+				lines = {newLine(), newLine(), newLine(), newLine()}
+				boxes[player] = lines
+			end
+			return lines
+		end
+
+		local function hideAll()
+			for _, lines in pairs(boxes) do
+				for _, l in ipairs(lines) do
+					l.Visible = false
+				end
+			end
+		end
+
+		local wasActive = false
+		local function updateEsp()
+			-- menu open -> nothing on the real players
+			local active = hasDrawing and enabled and win.gui.Parent ~= nil and not win.gui.Enabled
+			if not active then
+				if wasActive then
+					hideAll()
+					wasActive = false
+				end
+				return
+			end
+			wasActive = true
+
+			local camera = workspace.CurrentCamera
+			if not camera then
+				return
+			end
+			for _, player in ipairs(Players:GetPlayers()) do
+				if player ~= LocalPlayer then
+					local lines = getBox(player)
+					local char = player.Character
+					local hum = char and char:FindFirstChildOfClass("Humanoid")
+					local minX, minY, maxX, maxY
+					if char and hum and hum.Health > 0 then
+						minX, minY, maxX, maxY = getBounds(char, camera)
+					end
+
+					if minX then
+						local tl = Vector2.new(minX - PAD, minY - PAD)
+						local tr = Vector2.new(maxX + PAD, minY - PAD)
+						local bl = Vector2.new(minX - PAD, maxY + PAD)
+						local br = Vector2.new(maxX + PAD, maxY + PAD)
+						lines[1].From = tl; lines[1].To = tr
+						lines[2].From = bl; lines[2].To = br
+						lines[3].From = tl; lines[3].To = bl
+						lines[4].From = tr; lines[4].To = br
+						for _, l in ipairs(lines) do
+							l.Visible = true
+						end
+					else
+						for _, l in ipairs(lines) do
+							l.Visible = false
+						end
+					end
+				end
+			end
+		end
+
+		local renderConn = RunService.RenderStepped:Connect(function()
+			updatePreview()
+			updateEsp()
+		end)
+		local removingConn = Players.PlayerRemoving:Connect(removeBox)
+
+		switch.MouseButton1Click:Connect(function()
+			enabled = not enabled
+			applySwitch(true)
+		end)
+
+		local function destroy()
+			renderConn:Disconnect()
+			removingConn:Disconnect()
+			for player in pairs(boxes) do
+				removeBox(player)
+			end
+			preview:Destroy()
+		end
+		win.onClose(destroy)
+
+		return {
+			SetEnabled = function(value)
+				enabled = value and true or false
+				applySwitch(true)
+			end,
+			IsEnabled = function()
+				return enabled
+			end,
+			Destroy = destroy,
+		}
+	end
 end
-
-local function removeBox(player)
-    local data = boxes[player]
-    if not data then return end
-    for _, l in pairs(data) do pcall(function() l:Remove() end) end
-    boxes[player] = nil
-end
-
-local function createBox(player)
-    removeBox(player)
-    boxes[player] = { newLine(), newLine(), newLine(), newLine() }
-end
-
-local function getScreenBounds(char)
-    local parts = char:FindFirstChild("UpperTorso") and R15_PARTS or R6_PARTS
-    local minX, minY = math.huge, math.huge
-    local maxX, maxY = -math.huge, -math.huge
-    local any = false
-    for _, name in ipairs(parts) do
-        local part = char:FindFirstChild(name)
-        if part then
-            local s = part.Size
-            local offsets = {
-                Vector3.new( s.X/2,  s.Y/2,  s.Z/2), Vector3.new(-s.X/2,  s.Y/2,  s.Z/2),
-                Vector3.new( s.X/2, -s.Y/2,  s.Z/2), Vector3.new(-s.X/2, -s.Y/2,  s.Z/2),
-                Vector3.new( s.X/2,  s.Y/2, -s.Z/2), Vector3.new(-s.X/2,  s.Y/2, -s.Z/2),
-                Vector3.new( s.X/2, -s.Y/2, -s.Z/2), Vector3.new(-s.X/2, -s.Y/2, -s.Z/2),
-            }
-            for _, offset in ipairs(offsets) do
-                local sp, onScreen = Camera:WorldToViewportPoint((part.CFrame * CFrame.new(offset)).Position)
-                if onScreen then
-                    any = true
-                    if sp.X < minX then minX = sp.X end
-                    if sp.Y < minY then minY = sp.Y end
-                    if sp.X > maxX then maxX = sp.X end
-                    if sp.Y > maxY then maxY = sp.Y end
-                end
-            end
-        end
-    end
-    if any then return minX, minY, maxX, maxY end
-    return nil, nil, nil, nil
-end
-
-local function onPlayerAdded(player)
-    if player == LocalPlayer then return end
-    createBox(player)
-    player.CharacterAdded:Connect(function()
-        task.wait(0.1)
-        createBox(player)
-    end)
-end
-
-for _, p in ipairs(Players:GetPlayers()) do onPlayerAdded(p) end
-Players.PlayerAdded:Connect(onPlayerAdded)
-Players.PlayerRemoving:Connect(removeBox)
-
-RunService.RenderStepped:Connect(function()
-    for player, lines in pairs(boxes) do
-        local char = player.Character
-        local hum  = char and char:FindFirstChild("Humanoid")
-        local minX, minY, maxX, maxY = nil, nil, nil, nil
-
-        if char then
-            minX, minY, maxX, maxY = getScreenBounds(char)
-        end
-
-        if not minX or not hum or hum.Health <= 0 then
-            for _, l in pairs(lines) do l.Visible = false end
-            continue
-        end
-
-        local tl = Vector2.new(minX - 2, minY - 2)
-        local tr = Vector2.new(maxX + 2, minY - 2)
-        local bl = Vector2.new(minX - 2, maxY + 2)
-        local br = Vector2.new(maxX + 2, maxY + 2)
-
-        lines[1].From = tl; lines[1].To = tr; lines[1].Visible = true
-        lines[2].From = bl; lines[2].To = br; lines[2].Visible = true
-        lines[3].From = tl; lines[3].To = bl; lines[3].Visible = true
-        lines[4].From = tr; lines[4].To = br; lines[4].Visible = true
-    end
-end)
