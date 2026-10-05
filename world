@@ -25,6 +25,36 @@ return function(lib)
 		local conns = {}
 		local resets = {}
 
+		-- mouse position in the same space as AbsolutePosition.
+		-- self-corrects the top-bar offset the first time a swatch is clicked.
+		local GuiService = game:GetService("GuiService")
+		local mouseOffset = Vector2.zero
+
+		local function mousePos()
+			return UserInputService:GetMouseLocation() + mouseOffset
+		end
+
+		local function inside(pos, obj)
+			local p, sz = obj.AbsolutePosition, obj.AbsoluteSize
+			return pos.X >= p.X and pos.X <= p.X + sz.X and pos.Y >= p.Y and pos.Y <= p.Y + sz.Y
+		end
+
+		-- the mouse is known to be over `obj`; find the offset that agrees with that
+		local function calibrate(obj)
+			if inside(mousePos(), obj) then
+				return
+			end
+			local raw = UserInputService:GetMouseLocation()
+			local inset = GuiService:GetGuiInset().Y
+			for _, dy in ipairs({inset, -inset, 36, -36, 58, -58}) do
+				local off = Vector2.new(0, dy)
+				if dy ~= 0 and inside(raw + off, obj) then
+					mouseOffset = off
+					return
+				end
+			end
+		end
+
 		-- ====================================================
 		-- original values (restored when a feature is turned off)
 		-- ====================================================
@@ -291,12 +321,12 @@ return function(lib)
 			hit.InputBegan:Connect(function(input)
 				if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
 					dragging = true
-					setFromX(UserInputService:GetMouseLocation().X)
+					setFromX(mousePos().X)
 				end
 			end)
 			table.insert(conns, UserInputService.InputChanged:Connect(function(input)
 				if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-					setFromX(UserInputService:GetMouseLocation().X)
+					setFromX(mousePos().X)
 				end
 			end))
 			table.insert(conns, UserInputService.InputEnded:Connect(function(input)
@@ -457,7 +487,7 @@ return function(lib)
 
 			local dragMode -- "sv" or "hue"
 			local function drag()
-				local m = UserInputService:GetMouseLocation()
+				local m = mousePos()
 				if dragMode == "sv" then
 					local p, sz = sv.AbsolutePosition, sv.AbsoluteSize
 					s = math.clamp((m.X - p.X) / sz.X, 0, 1)
@@ -474,6 +504,10 @@ return function(lib)
 				return function(input)
 					if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
 						dragMode = mode
+						local target = mode == "sv" and sv or hueBar
+						if not inside(mousePos(), target) then
+							calibrate(target)
+						end
 						drag()
 					end
 				end
@@ -493,6 +527,7 @@ return function(lib)
 			end))
 
 			swatch.MouseButton1Click:Connect(function()
+				calibrate(swatch)
 				panel.Visible = not panel.Visible
 			end)
 
