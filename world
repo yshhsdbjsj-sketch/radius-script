@@ -1,0 +1,682 @@
+-- world.lua
+-- usage: local buildWorldTab = loadstring(game:HttpGet(URL))()(lib)
+--        buildWorldTab({pages = pages, fadeInfo = fadeInfo, slideInfo = slideInfo})
+return function(lib)
+	local TweenService = lib.TweenService
+	local RunService = lib.RunService
+	local UserInputService = lib.UserInputService
+	local TEXT_MAIN = lib.TEXT_MAIN
+	local addCorner = lib.addCorner
+	local addStroke = lib.addStroke
+	local win = lib.win
+	local Lighting = game:GetService("Lighting")
+
+	return function(cfg)
+		local page = cfg.pages["World"]
+		local fadeInfo = cfg.fadeInfo
+
+		local CARD_BG = Color3.fromRGB(28, 28, 32)
+		local CARD_STROKE = Color3.fromRGB(42, 42, 47)
+		local TEXT_DIM = Color3.fromRGB(130, 130, 136)
+		local TEXT_SOFT = Color3.fromRGB(190, 190, 196)
+		local TRACK = Color3.fromRGB(44, 44, 50)
+		local WHITE = Color3.fromRGB(225, 225, 232)
+
+		local conns = {}
+		local resets = {}
+
+		-- ====================================================
+		-- original values (restored when a feature is turned off)
+		-- ====================================================
+		local cam0 = workspace.CurrentCamera
+		local atmo0 = Lighting:FindFirstChildOfClass("Atmosphere")
+		local orig = {
+			FOV = cam0 and cam0.FieldOfView or 70,
+			ClockTime = Lighting.ClockTime,
+			Brightness = Lighting.Brightness,
+			Exposure = Lighting.ExposureCompensation,
+			Ambient = Lighting.Ambient,
+			OutdoorAmbient = Lighting.OutdoorAmbient,
+			GlobalShadows = Lighting.GlobalShadows,
+			FogColor = Lighting.FogColor,
+			FogStart = Lighting.FogStart,
+			FogEnd = Lighting.FogEnd,
+			AtmoDensity = atmo0 and atmo0.Density,
+			AtmoHaze = atmo0 and atmo0.Haze,
+			AtmoColor = atmo0 and atmo0.Color,
+		}
+
+		local state = {
+			fov = {on = false, value = orig.FOV},
+			time = {on = false, value = orig.ClockTime},
+			brightness = {on = false, value = orig.Brightness},
+			exposure = {on = false, value = orig.Exposure},
+			fullbright = {on = false},
+			nofog = {on = false},
+			fog = {on = false, color = orig.FogColor, start = orig.FogStart, stop = orig.FogEnd},
+			ambience = {on = false, ambient = orig.Ambient, outdoor = orig.OutdoorAmbient},
+		}
+
+		local restore = {}
+		local function restoreAmbient()
+			Lighting.Ambient = orig.Ambient
+			Lighting.OutdoorAmbient = orig.OutdoorAmbient
+		end
+		local function restoreFog()
+			Lighting.FogColor = orig.FogColor
+			Lighting.FogStart = orig.FogStart
+			Lighting.FogEnd = orig.FogEnd
+			local atmo = Lighting:FindFirstChildOfClass("Atmosphere")
+			if atmo and orig.AtmoDensity then
+				atmo.Density = orig.AtmoDensity
+				atmo.Haze = orig.AtmoHaze
+				atmo.Color = orig.AtmoColor
+			end
+		end
+		function restore.fov()
+			local cam = workspace.CurrentCamera
+			if cam then
+				cam.FieldOfView = orig.FOV
+			end
+		end
+		function restore.time() Lighting.ClockTime = orig.ClockTime end
+		function restore.brightness() Lighting.Brightness = orig.Brightness end
+		function restore.exposure() Lighting.ExposureCompensation = orig.Exposure end
+		function restore.ambience() restoreAmbient() end
+		function restore.fullbright()
+			restoreAmbient()
+			Lighting.GlobalShadows = orig.GlobalShadows
+		end
+		restore.fog = restoreFog
+		restore.nofog = restoreFog
+
+		-- held every frame so the game can't change them back
+		local function applyActive()
+			local cam = workspace.CurrentCamera
+			if state.fov.on and cam then
+				cam.FieldOfView = state.fov.value
+			end
+			if state.time.on then
+				Lighting.ClockTime = state.time.value
+			end
+			if state.brightness.on then
+				Lighting.Brightness = state.brightness.value
+			end
+			if state.exposure.on then
+				Lighting.ExposureCompensation = state.exposure.value
+			end
+			if state.ambience.on then
+				Lighting.Ambient = state.ambience.ambient
+				Lighting.OutdoorAmbient = state.ambience.outdoor
+			end
+			if state.fullbright.on then
+				Lighting.Ambient = Color3.fromRGB(255, 255, 255)
+				Lighting.OutdoorAmbient = Color3.fromRGB(255, 255, 255)
+				Lighting.GlobalShadows = false
+			end
+			local atmo = Lighting:FindFirstChildOfClass("Atmosphere")
+			if state.fog.on then
+				Lighting.FogColor = state.fog.color
+				Lighting.FogStart = state.fog.start
+				Lighting.FogEnd = state.fog.stop
+				if atmo then
+					atmo.Color = state.fog.color
+				end
+			end
+			if state.nofog.on then
+				Lighting.FogStart = 0
+				Lighting.FogEnd = 1e8
+				if atmo then
+					atmo.Density = 0
+					atmo.Haze = 0
+				end
+			end
+		end
+		table.insert(conns, RunService.RenderStepped:Connect(applyActive))
+
+		-- ====================================================
+		-- UI builders
+		-- ====================================================
+		local function place(obj, parent)
+			obj.LayoutOrder = #parent:GetChildren()
+			obj.Parent = parent
+		end
+
+		local function makeSwitch(parent, initial, onChange)
+			local ON_KNOB = Color3.fromRGB(22, 22, 25)
+			local OFF_KNOB = Color3.fromRGB(140, 140, 146)
+
+			local switch = Instance.new("TextButton")
+			switch.AnchorPoint = Vector2.new(1, 0.5)
+			switch.Position = UDim2.new(1, 0, 0.5, 0)
+			switch.Size = UDim2.fromOffset(46, 24)
+			switch.AutoButtonColor = false
+			switch.Text = ""
+			switch.BorderSizePixel = 0
+			switch.Parent = parent
+			addCorner(switch, 7)
+			local stroke = addStroke(switch, Color3.fromRGB(60, 60, 66))
+
+			local knob = Instance.new("Frame")
+			knob.AnchorPoint = Vector2.new(0, 0.5)
+			knob.Size = UDim2.fromOffset(18, 18)
+			knob.BorderSizePixel = 0
+			knob.Parent = switch
+			addCorner(knob, 5)
+
+			local isOn = initial
+			local function apply(animate)
+				local info = animate and fadeInfo or TweenInfo.new(0)
+				TweenService:Create(switch, info, {BackgroundColor3 = isOn and WHITE or TRACK}):Play()
+				TweenService:Create(knob, info, {
+					BackgroundColor3 = isOn and ON_KNOB or OFF_KNOB,
+					Position = UDim2.new(0, isOn and 25 or 3, 0.5, 0),
+				}):Play()
+			end
+			apply(false)
+
+			switch.MouseEnter:Connect(function()
+				TweenService:Create(stroke, fadeInfo, {Color = Color3.fromRGB(110, 110, 120)}):Play()
+			end)
+			switch.MouseLeave:Connect(function()
+				TweenService:Create(stroke, fadeInfo, {Color = Color3.fromRGB(60, 60, 66)}):Play()
+			end)
+
+			local obj = {}
+			function obj.Set(v, fire)
+				isOn = v
+				apply(true)
+				if fire and onChange then
+					onChange(v)
+				end
+			end
+			switch.MouseButton1Click:Connect(function()
+				obj.Set(not isOn, true)
+			end)
+			table.insert(resets, function()
+				obj.Set(false, true)
+			end)
+			return obj
+		end
+
+		local function makeSlider(parent, labelText, min, max, step, default, fmt, onChange)
+			local row = Instance.new("Frame")
+			row.BackgroundTransparency = 1
+			row.Size = UDim2.new(1, 0, 0, 26)
+			place(row, parent)
+
+			local labelW = labelText and 62 or 0
+			if labelText then
+				local l = Instance.new("TextLabel")
+				l.BackgroundTransparency = 1
+				l.Size = UDim2.new(0, labelW, 1, 0)
+				l.Font = Enum.Font.GothamMedium
+				l.Text = labelText
+				l.TextColor3 = TEXT_DIM
+				l.TextSize = 12
+				l.TextXAlignment = Enum.TextXAlignment.Left
+				l.Parent = row
+			end
+
+			local track = Instance.new("Frame")
+			track.AnchorPoint = Vector2.new(0, 0.5)
+			track.Position = UDim2.new(0, labelW, 0.5, 0)
+			track.Size = UDim2.new(1, -(labelW + 58), 0, 4)
+			track.BackgroundColor3 = TRACK
+			track.BorderSizePixel = 0
+			track.Parent = row
+			addCorner(track, 2)
+
+			local fill = Instance.new("Frame")
+			fill.BackgroundColor3 = WHITE
+			fill.BorderSizePixel = 0
+			fill.Size = UDim2.fromScale(0, 1)
+			fill.Parent = track
+			addCorner(fill, 2)
+
+			local knob = Instance.new("Frame")
+			knob.AnchorPoint = Vector2.new(0.5, 0.5)
+			knob.Size = UDim2.fromOffset(12, 12)
+			knob.BackgroundColor3 = Color3.fromRGB(245, 245, 248)
+			knob.BorderSizePixel = 0
+			knob.ZIndex = 2
+			knob.Parent = track
+			addCorner(knob, 6)
+
+			local valueLabel = Instance.new("TextLabel")
+			valueLabel.BackgroundTransparency = 1
+			valueLabel.AnchorPoint = Vector2.new(1, 0)
+			valueLabel.Position = UDim2.new(1, 0, 0, 0)
+			valueLabel.Size = UDim2.new(0, 52, 1, 0)
+			valueLabel.Font = Enum.Font.GothamMedium
+			valueLabel.TextColor3 = TEXT_SOFT
+			valueLabel.TextSize = 12
+			valueLabel.TextXAlignment = Enum.TextXAlignment.Right
+			valueLabel.Parent = row
+
+			local function set(v, fire)
+				v = math.clamp(v, min, max)
+				local a = (v - min) / (max - min)
+				fill.Size = UDim2.fromScale(a, 1)
+				knob.Position = UDim2.fromScale(a, 0.5)
+				valueLabel.Text = fmt(v)
+				if fire and onChange then
+					onChange(v)
+				end
+			end
+			set(default, false)
+
+			local hit = Instance.new("TextButton")
+			hit.BackgroundTransparency = 1
+			hit.Text = ""
+			hit.AutoButtonColor = false
+			hit.AnchorPoint = Vector2.new(0, 0.5)
+			hit.Position = UDim2.new(0, labelW, 0.5, 0)
+			hit.Size = UDim2.new(1, -(labelW + 58), 1, 0)
+			hit.ZIndex = 3
+			hit.Parent = row
+
+			local dragging = false
+			local function setFromX(x)
+				local w = track.AbsoluteSize.X
+				if w <= 0 then
+					return
+				end
+				local a = math.clamp((x - track.AbsolutePosition.X) / w, 0, 1)
+				local v = min + a * (max - min)
+				v = math.floor(v / step + 0.5) * step
+				set(v, true)
+			end
+
+			hit.InputBegan:Connect(function(input)
+				if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+					dragging = true
+					setFromX(UserInputService:GetMouseLocation().X)
+				end
+			end)
+			table.insert(conns, UserInputService.InputChanged:Connect(function(input)
+				if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+					setFromX(UserInputService:GetMouseLocation().X)
+				end
+			end))
+			table.insert(conns, UserInputService.InputEnded:Connect(function(input)
+				if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+					dragging = false
+				end
+			end))
+
+			table.insert(resets, function()
+				set(default, true)
+			end)
+		end
+
+		local function makeColor(parent, labelText, default, onChange)
+			local holder = Instance.new("Frame")
+			holder.BackgroundTransparency = 1
+			holder.Size = UDim2.new(1, 0, 0, 0)
+			holder.AutomaticSize = Enum.AutomaticSize.Y
+			place(holder, parent)
+
+			local holderLayout = Instance.new("UIListLayout")
+			holderLayout.Padding = UDim.new(0, 6)
+			holderLayout.SortOrder = Enum.SortOrder.LayoutOrder
+			holderLayout.Parent = holder
+
+			local row = Instance.new("Frame")
+			row.BackgroundTransparency = 1
+			row.Size = UDim2.new(1, 0, 0, 26)
+			place(row, holder)
+
+			local l = Instance.new("TextLabel")
+			l.BackgroundTransparency = 1
+			l.Size = UDim2.new(0.6, 0, 1, 0)
+			l.Font = Enum.Font.GothamMedium
+			l.Text = labelText
+			l.TextColor3 = TEXT_DIM
+			l.TextSize = 12
+			l.TextXAlignment = Enum.TextXAlignment.Left
+			l.Parent = row
+
+			local swatch = Instance.new("TextButton")
+			swatch.AnchorPoint = Vector2.new(1, 0.5)
+			swatch.Position = UDim2.new(1, 0, 0.5, 0)
+			swatch.Size = UDim2.fromOffset(46, 20)
+			swatch.BackgroundColor3 = default
+			swatch.BorderSizePixel = 0
+			swatch.AutoButtonColor = false
+			swatch.Text = ""
+			swatch.Parent = row
+			addCorner(swatch, 5)
+			local swatchStroke = addStroke(swatch, Color3.fromRGB(60, 60, 66))
+			swatch.MouseEnter:Connect(function()
+				TweenService:Create(swatchStroke, fadeInfo, {Color = Color3.fromRGB(110, 110, 120)}):Play()
+			end)
+			swatch.MouseLeave:Connect(function()
+				TweenService:Create(swatchStroke, fadeInfo, {Color = Color3.fromRGB(60, 60, 66)}):Play()
+			end)
+
+			-- picker panel (hidden until the swatch is clicked)
+			local panel = Instance.new("Frame")
+			panel.BackgroundTransparency = 1
+			panel.Size = UDim2.new(1, 0, 0, 118)
+			panel.Visible = false
+			place(panel, holder)
+
+			local sv = Instance.new("Frame")
+			sv.Size = UDim2.new(1, 0, 0, 90)
+			sv.BorderSizePixel = 0
+			sv.BackgroundColor3 = Color3.new(1, 0, 0)
+			sv.Parent = panel
+			addCorner(sv, 5)
+
+			local white = Instance.new("Frame")
+			white.Size = UDim2.fromScale(1, 1)
+			white.BackgroundColor3 = Color3.new(1, 1, 1)
+			white.BorderSizePixel = 0
+			white.Parent = sv
+			addCorner(white, 5)
+			local wg = Instance.new("UIGradient")
+			wg.Transparency = NumberSequence.new({NumberSequenceKeypoint.new(0, 0), NumberSequenceKeypoint.new(1, 1)})
+			wg.Parent = white
+
+			local black = Instance.new("Frame")
+			black.Size = UDim2.fromScale(1, 1)
+			black.BackgroundColor3 = Color3.new(0, 0, 0)
+			black.BorderSizePixel = 0
+			black.Parent = sv
+			addCorner(black, 5)
+			local bg = Instance.new("UIGradient")
+			bg.Rotation = 90
+			bg.Transparency = NumberSequence.new({NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(1, 0)})
+			bg.Parent = black
+
+			local svCursor = Instance.new("Frame")
+			svCursor.AnchorPoint = Vector2.new(0.5, 0.5)
+			svCursor.Size = UDim2.fromOffset(10, 10)
+			svCursor.BackgroundTransparency = 1
+			svCursor.BorderSizePixel = 0
+			svCursor.ZIndex = 3
+			svCursor.Parent = sv
+			addCorner(svCursor, 5)
+			addStroke(svCursor, Color3.new(1, 1, 1))
+
+			local svHit = Instance.new("TextButton")
+			svHit.BackgroundTransparency = 1
+			svHit.Text = ""
+			svHit.AutoButtonColor = false
+			svHit.Size = UDim2.fromScale(1, 1)
+			svHit.ZIndex = 4
+			svHit.Parent = sv
+
+			local hueBar = Instance.new("Frame")
+			hueBar.Position = UDim2.fromOffset(0, 98)
+			hueBar.Size = UDim2.new(1, 0, 0, 14)
+			hueBar.BackgroundColor3 = Color3.new(1, 1, 1)
+			hueBar.BorderSizePixel = 0
+			hueBar.Parent = panel
+			addCorner(hueBar, 5)
+			local hg = Instance.new("UIGradient")
+			local keys = {}
+			for i = 0, 6 do
+				table.insert(keys, ColorSequenceKeypoint.new(i / 6, Color3.fromHSV(math.min(i / 6, 0.999), 1, 1)))
+			end
+			hg.Color = ColorSequence.new(keys)
+			hg.Parent = hueBar
+
+			local hueCursor = Instance.new("Frame")
+			hueCursor.AnchorPoint = Vector2.new(0.5, 0.5)
+			hueCursor.Size = UDim2.fromOffset(4, 18)
+			hueCursor.BackgroundColor3 = Color3.new(1, 1, 1)
+			hueCursor.BorderSizePixel = 0
+			hueCursor.ZIndex = 3
+			hueCursor.Parent = hueBar
+			addCorner(hueCursor, 2)
+			addStroke(hueCursor, Color3.fromRGB(20, 20, 23))
+
+			local hueHit = Instance.new("TextButton")
+			hueHit.BackgroundTransparency = 1
+			hueHit.Text = ""
+			hueHit.AutoButtonColor = false
+			hueHit.Size = UDim2.fromScale(1, 1)
+			hueHit.ZIndex = 4
+			hueHit.Parent = hueBar
+
+			local h, s, v = default:ToHSV()
+
+			local function refresh(fire)
+				local color = Color3.fromHSV(h, s, v)
+				swatch.BackgroundColor3 = color
+				sv.BackgroundColor3 = Color3.fromHSV(h, 1, 1)
+				svCursor.Position = UDim2.fromScale(s, 1 - v)
+				hueCursor.Position = UDim2.fromScale(h, 0.5)
+				if fire and onChange then
+					onChange(color)
+				end
+			end
+			refresh(false)
+
+			local dragMode -- "sv" or "hue"
+			local function drag()
+				local m = UserInputService:GetMouseLocation()
+				if dragMode == "sv" then
+					local p, sz = sv.AbsolutePosition, sv.AbsoluteSize
+					s = math.clamp((m.X - p.X) / sz.X, 0, 1)
+					v = 1 - math.clamp((m.Y - p.Y) / sz.Y, 0, 1)
+					refresh(true)
+				elseif dragMode == "hue" then
+					local p, sz = hueBar.AbsolutePosition, hueBar.AbsoluteSize
+					h = math.clamp((m.X - p.X) / sz.X, 0, 1)
+					refresh(true)
+				end
+			end
+
+			local function startDrag(mode)
+				return function(input)
+					if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+						dragMode = mode
+						drag()
+					end
+				end
+			end
+			svHit.InputBegan:Connect(startDrag("sv"))
+			hueHit.InputBegan:Connect(startDrag("hue"))
+
+			table.insert(conns, UserInputService.InputChanged:Connect(function(input)
+				if dragMode and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+					drag()
+				end
+			end))
+			table.insert(conns, UserInputService.InputEnded:Connect(function(input)
+				if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+					dragMode = nil
+				end
+			end))
+
+			swatch.MouseButton1Click:Connect(function()
+				panel.Visible = not panel.Visible
+			end)
+
+			table.insert(resets, function()
+				h, s, v = default:ToHSV()
+				refresh(true)
+			end)
+		end
+
+		-- ====================================================
+		-- page layout: scrolling list of section cards
+		-- ====================================================
+		local scroll = Instance.new("ScrollingFrame")
+		scroll.Name = "WorldScroll"
+		scroll.BackgroundTransparency = 1
+		scroll.BorderSizePixel = 0
+		scroll.Position = UDim2.fromOffset(20, 60)
+		scroll.Size = UDim2.new(1, -40, 1, -70)
+		scroll.CanvasSize = UDim2.new()
+		scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+		scroll.ScrollingDirection = Enum.ScrollingDirection.Y
+		scroll.ScrollBarThickness = 3
+		scroll.ScrollBarImageColor3 = Color3.fromRGB(90, 90, 98)
+		scroll.Parent = page
+
+		local scrollLayout = Instance.new("UIListLayout")
+		scrollLayout.Padding = UDim.new(0, 6)
+		scrollLayout.SortOrder = Enum.SortOrder.LayoutOrder
+		scrollLayout.Parent = scroll
+
+		local scrollPad = Instance.new("UIPadding")
+		scrollPad.PaddingRight = UDim.new(0, 8)
+		scrollPad.PaddingBottom = UDim.new(0, 6)
+		scrollPad.Parent = scroll
+
+		local function toggled(key)
+			return function(on)
+				state[key].on = on
+				if not on then
+					restore[key]()
+				end
+			end
+		end
+
+		-- a card with a title + switch; returns the card to add rows into
+		local function makeSection(title, key)
+			local card = Instance.new("Frame")
+			card.BackgroundColor3 = CARD_BG
+			card.BorderSizePixel = 0
+			card.Size = UDim2.new(1, 0, 0, 0)
+			card.AutomaticSize = Enum.AutomaticSize.Y
+			place(card, scroll)
+			addCorner(card)
+			addStroke(card, CARD_STROKE)
+
+			local pad = Instance.new("UIPadding")
+			pad.PaddingLeft = UDim.new(0, 12)
+			pad.PaddingRight = UDim.new(0, 12)
+			pad.PaddingTop = UDim.new(0, 10)
+			pad.PaddingBottom = UDim.new(0, 10)
+			pad.Parent = card
+
+			local layout = Instance.new("UIListLayout")
+			layout.Padding = UDim.new(0, 6)
+			layout.SortOrder = Enum.SortOrder.LayoutOrder
+			layout.Parent = card
+
+			local header = Instance.new("Frame")
+			header.BackgroundTransparency = 1
+			header.Size = UDim2.new(1, 0, 0, 26)
+			place(header, card)
+
+			local label = Instance.new("TextLabel")
+			label.BackgroundTransparency = 1
+			label.Size = UDim2.new(0.7, 0, 1, 0)
+			label.Font = Enum.Font.GothamMedium
+			label.Text = title
+			label.TextColor3 = TEXT_MAIN
+			label.TextSize = 14
+			label.TextXAlignment = Enum.TextXAlignment.Left
+			label.Parent = header
+
+			makeSwitch(header, false, toggled(key))
+			return card
+		end
+
+		local function whole(v) return string.format("%d", v) end
+		local function oneDec(v) return string.format("%.1f", v) end
+		local function clock(v)
+			local hh = math.floor(v)
+			local mm = math.floor((v - hh) * 60 + 0.5)
+			if mm == 60 then
+				hh += 1
+				mm = 0
+			end
+			return string.format("%02d:%02d", hh % 24, mm)
+		end
+
+		-- FOV
+		local fovCard = makeSection("Field of view", "fov")
+		makeSlider(fovCard, nil, 30, 120, 1, orig.FOV, whole, function(v)
+			state.fov.value = v
+		end)
+
+		-- Time of day
+		local timeCard = makeSection("Time of day", "time")
+		makeSlider(timeCard, nil, 0, 24, 0.1, orig.ClockTime, clock, function(v)
+			state.time.value = v
+		end)
+
+		-- Brightness
+		local brightCard = makeSection("Brightness", "brightness")
+		makeSlider(brightCard, nil, 0, 10, 0.1, orig.Brightness, oneDec, function(v)
+			state.brightness.value = v
+		end)
+
+		-- Exposure
+		local exposureCard = makeSection("Exposure", "exposure")
+		makeSlider(exposureCard, nil, -3, 3, 0.1, orig.Exposure, oneDec, function(v)
+			state.exposure.value = v
+		end)
+
+		-- Fullbright / No fog (switch only)
+		makeSection("Fullbright", "fullbright")
+		makeSection("No fog", "nofog")
+
+		-- Custom fog
+		local fogCard = makeSection("Custom fog", "fog")
+		makeColor(fogCard, "Fog color", orig.FogColor, function(c)
+			state.fog.color = c
+		end)
+		makeSlider(fogCard, "Start", 0, 2000, 10, orig.FogStart, whole, function(v)
+			state.fog.start = v
+		end)
+		makeSlider(fogCard, "End", 50, 5000, 10, orig.FogEnd, whole, function(v)
+			state.fog.stop = v
+		end)
+
+		-- Ambience
+		local ambCard = makeSection("Ambience", "ambience")
+		makeColor(ambCard, "Ambient", orig.Ambient, function(c)
+			state.ambience.ambient = c
+		end)
+		makeColor(ambCard, "Outdoor ambient", orig.OutdoorAmbient, function(c)
+			state.ambience.outdoor = c
+		end)
+
+		-- Reset all
+		local resetBtn = Instance.new("TextButton")
+		resetBtn.Name = "ResetAll"
+		resetBtn.Size = UDim2.new(1, 0, 0, 32)
+		resetBtn.BackgroundColor3 = Color3.fromRGB(36, 36, 41)
+		resetBtn.BorderSizePixel = 0
+		resetBtn.AutoButtonColor = false
+		resetBtn.Font = Enum.Font.GothamMedium
+		resetBtn.Text = "Reset all"
+		resetBtn.TextColor3 = Color3.fromRGB(215, 215, 220)
+		resetBtn.TextSize = 13
+		place(resetBtn, scroll)
+		addCorner(resetBtn)
+		local resetStroke = addStroke(resetBtn, Color3.fromRGB(46, 46, 51))
+		resetBtn.MouseEnter:Connect(function()
+			TweenService:Create(resetBtn, fadeInfo, {BackgroundColor3 = Color3.fromRGB(48, 48, 55), TextColor3 = TEXT_MAIN}):Play()
+			TweenService:Create(resetStroke, fadeInfo, {Color = Color3.fromRGB(95, 95, 104)}):Play()
+		end)
+		resetBtn.MouseLeave:Connect(function()
+			TweenService:Create(resetBtn, fadeInfo, {BackgroundColor3 = Color3.fromRGB(36, 36, 41), TextColor3 = Color3.fromRGB(215, 215, 220)}):Play()
+			TweenService:Create(resetStroke, fadeInfo, {Color = Color3.fromRGB(46, 46, 51)}):Play()
+		end)
+		resetBtn.MouseButton1Click:Connect(function()
+			for _, fn in ipairs(resets) do
+				fn()
+			end
+		end)
+
+		-- closing the window puts the world back how it was
+		win.onClose(function()
+			for _, c in ipairs(conns) do
+				c:Disconnect()
+			end
+			table.clear(conns)
+			for _, fn in pairs(restore) do
+				fn()
+			end
+		end)
+	end
+end
