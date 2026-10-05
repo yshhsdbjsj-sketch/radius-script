@@ -621,41 +621,72 @@ return function(lib)
 		end
 
 		-- No Slowdown (switch-only)
+		-- Stores the player's intended WalkSpeed when toggled on, then uses a
+		-- WalkSpeed property-changed signal for instant reaction instead of polling.
+		local noSlowConn
 		do
 			local card = newCard(7)
 			addHeader(card, noSlow, "No Slowdown")
+
+			local function wireNoSlow(hum)
+				if noSlowConn then noSlowConn:Disconnect(); noSlowConn = nil end
+				if not (noSlow.active and hum) then return end
+				-- Snapshot the speed the moment we enable (before the game can touch it).
+				noSlow._baseSpeed = hum.WalkSpeed
+				noSlowConn = hum:GetPropertyChangedSignal("WalkSpeed"):Connect(function()
+					-- If anything outside of us lowers WalkSpeed, snap it back instantly.
+					if noSlow.active and noSlow._baseSpeed and hum.WalkSpeed < noSlow._baseSpeed then
+						hum.WalkSpeed = noSlow._baseSpeed
+					elseif noSlow.active and noSlow._baseSpeed and hum.WalkSpeed > noSlow._baseSpeed then
+						-- Track intentional upward changes (e.g. the Speed feature).
+						noSlow._baseSpeed = hum.WalkSpeed
+					end
+				end)
+			end
+
 			noSlow.onChange = function(active)
-				if not active then
+				if active then
+					local _, hum = getChar()
+					wireNoSlow(hum)
+				else
+					if noSlowConn then noSlowConn:Disconnect(); noSlowConn = nil end
 					noSlow._baseSpeed = nil
 				end
 			end
+			-- expose wireNoSlow so CharacterAdded can re-wire it
+			noSlow._wire = wireNoSlow
 		end
 
 		-- No Jump Cooldown (switch-only)
+		-- Catches both Landed and GettingUp states (the two states that block jumping)
+		-- and immediately forces the humanoid back to Running — synchronously, no defer.
 		local jumpCDStateConn
 		do
 			local card = newCard(8)
 			addHeader(card, noJumpCD, "No Jump Cooldown")
+
+			local function wireJumpCD(hum)
+				if jumpCDStateConn then jumpCDStateConn:Disconnect(); jumpCDStateConn = nil end
+				if not (noJumpCD.active and hum) then return end
+				jumpCDStateConn = hum.StateChanged:Connect(function(_, new)
+					if not noJumpCD.active then return end
+					if new == Enum.HumanoidStateType.Landed
+						or new == Enum.HumanoidStateType.GettingUp then
+						-- Synchronous — no defer, no delay. Skip straight to Running.
+						hum:ChangeState(Enum.HumanoidStateType.Running)
+					end
+				end)
+			end
+
 			noJumpCD.onChange = function(active)
-				if jumpCDStateConn then
-					jumpCDStateConn:Disconnect()
-					jumpCDStateConn = nil
-				end
 				if active then
 					local _, hum = getChar()
-					if hum then
-						jumpCDStateConn = hum.StateChanged:Connect(function(_, new)
-							if new == Enum.HumanoidStateType.Landed then
-								task.defer(function()
-									if noJumpCD.active and hum and hum.Parent then
-										hum:ChangeState(Enum.HumanoidStateType.Running)
-									end
-								end)
-							end
-						end)
-					end
+					wireJumpCD(hum)
+				else
+					if jumpCDStateConn then jumpCDStateConn:Disconnect(); jumpCDStateConn = nil end
 				end
 			end
+			noJumpCD._wire = wireJumpCD
 		end
 
 		-- ====================================================
@@ -841,18 +872,6 @@ return function(lib)
 				jumpBoosted = false
 			end
 
-			-- No Slowdown: remember the intended WalkSpeed when first enabled, then restore
-			-- it every frame if the game lowers it (reload/crouch/shoot penalties).
-			if noSlow.active then
-				if not noSlow._baseSpeed then
-					noSlow._baseSpeed = hum.WalkSpeed
-				elseif hum.WalkSpeed < noSlow._baseSpeed then
-					hum.WalkSpeed = noSlow._baseSpeed
-				else
-					noSlow._baseSpeed = hum.WalkSpeed -- track intentional speed changes
-				end
-			end
-
 			local wantSlip = speed.active and not flight.active and speedMethod.Get() == "Slippery"
 			if wantSlip and not slipApplied then
 				applyFriction(char)
@@ -874,25 +893,10 @@ return function(lib)
 			jumpBoosted = false
 			noSlow._baseSpeed = nil
 
-			-- re-wire No Jump Cooldown to the new humanoid
-			if jumpCDStateConn then
-				jumpCDStateConn:Disconnect()
-				jumpCDStateConn = nil
-			end
-			if noJumpCD.active then
-				local hum = char:WaitForChild("Humanoid", 5)
-				if hum then
-					jumpCDStateConn = hum.StateChanged:Connect(function(_, new)
-						if new == Enum.HumanoidStateType.Landed then
-							task.defer(function()
-								if noJumpCD.active and hum and hum.Parent then
-									hum:ChangeState(Enum.HumanoidStateType.Running)
-								end
-							end)
-						end
-					end)
-				end
-			end
+			-- re-wire both signal-based features to the new humanoid
+			local hum = char:WaitForChild("Humanoid", 5)
+			noSlow._wire(hum)
+			noJumpCD._wire(hum)
 		end)
 
 		-- ====================================================
@@ -902,6 +906,7 @@ return function(lib)
 			for _, f in ipairs({noclip, infJump, speed, flight, jump, gravity, noSlow, noJumpCD}) do
 				setActive(f, false)
 			end
+			if noSlowConn then noSlowConn:Disconnect(); noSlowConn = nil end
 			if jumpCDStateConn then jumpCDStateConn:Disconnect(); jumpCDStateConn = nil end
 			restoreFriction()
 			restoreCollisions()
