@@ -1,4 +1,840 @@
 -- boxesp module (Visuals tab)
+-- usage in the main script (unchanged):
+--   local buildBoxEsp = loadstring(game:HttpGet(BOXESP_URL))()(lib)
+--   buildBoxEsp({pages = pages, fadeInfo = fadeInfo, slideInfo = slideInfo, popup = popup})
+--
+-- behaviour:
+--   * "Box Esp" switch on the Visuals page
+--   * switching it on opens a settings window under the menu: color picker + style
+--     (Full / Corners / 3D)
+--   * while the menu is OPEN the box only shows on the 3D avatar preview
+--   * when the menu is HIDDEN (menu toggle key) the box draws on every player
+--   * the preview and the real ESP always use the same color and style
+
+return function(lib)
+	local Players = lib.Players
+	local TweenService = lib.TweenService
+	local RunService = lib.RunService
+	local UserInputService = lib.UserInputService
+	local win = lib.win
+	local addCorner, addStroke = lib.addCorner, lib.addStroke
+	local TEXT_MAIN = lib.TEXT_MAIN
+
+	local LocalPlayer = Players.LocalPlayer
+
+	local THICKNESS = 1.5
+	local PAD = 2
+	local SEG_MAX = 12
+
+	local R15_PARTS = {
+		"Head", "UpperTorso", "LowerTorso",
+		"LeftUpperArm", "RightUpperArm", "LeftLowerArm", "RightLowerArm",
+		"LeftHand", "RightHand",
+		"LeftUpperLeg", "RightUpperLeg", "LeftLowerLeg", "RightLowerLeg",
+		"LeftFoot", "RightFoot",
+	}
+	local R6_PARTS = {"Head", "Torso", "Left Arm", "Right Arm", "Left Leg", "Right Leg"}
+
+	-- ========================================================
+	-- geometry: one function turns a character into line segments
+	-- (used by both the Drawing ESP and the GUI preview)
+	-- ========================================================
+	local segs = {}
+	for i = 1, SEG_MAX do
+		segs[i] = {0, 0, 0, 0}
+	end
+
+	local function setSeg(i, ax, ay, bx, by)
+		local s = segs[i]
+		s[1], s[2], s[3], s[4] = ax, ay, bx, by
+	end
+
+	-- project(world) -> x, y, visible
+	-- no vpSize -> normal camera (WorldToViewportPoint)
+	-- vpSize    -> ViewportFrame camera, projected manually with that frame size
+	local function makeProjector(camera, vpSize)
+		if vpSize then
+			local camCF = camera.CFrame
+			local tanHalf = math.tan(math.rad(camera.FieldOfView) / 2)
+			local w, h = vpSize.X, vpSize.Y
+			local aspect = w / h
+			return function(world)
+				local rel = camCF:PointToObjectSpace(world)
+				if rel.Z >= -0.05 then
+					return 0, 0, false
+				end
+				local d = -rel.Z * tanHalf
+				return (rel.X / (d * aspect) * 0.5 + 0.5) * w, (0.5 - rel.Y / d * 0.5) * h, true
+			end
+		end
+		return function(world)
+			local sp, onScreen = camera:WorldToViewportPoint(world)
+			return sp.X, sp.Y, onScreen
+		end
+	end
+
+	-- 12 edges of a box; corner c (0-7): bit0 = X, bit1 = Y, bit2 = Z (0 = min, 1 = max)
+	local EDGES3D = {}
+	for c = 0, 7 do
+		for _, bit in ipairs({1, 2, 4}) do
+			if bit32.band(c, bit) == 0 then
+				table.insert(EDGES3D, {c + 1, c + bit + 1})
+			end
+		end
+	end
+	local cornerX, cornerY = {}, {}
+
+	-- fills `segs`, returns how many segments to draw (0 = hide)
+	local function computeSegments(char, project, style)
+		local parts = char:FindFirstChild("UpperTorso") and R15_PARTS or R6_PARTS
+
+		if style == "3D" then
+			-- box that rotates with the character (measured in the root part's space)
+			local root = char:FindFirstChild("HumanoidRootPart")
+				or char:FindFirstChild("UpperTorso")
+				or char:FindFirstChild("Torso")
+			if not root then
+				return 0
+			end
+			local rootCF = root.CFrame
+			local loX, loY, loZ = math.huge, math.huge, math.huge
+			local hiX, hiY, hiZ = -math.huge, -math.huge, -math.huge
+			local any = false
+			for _, name in ipairs(parts) do
+				local part = char:FindFirstChild(name)
+				if part then
+					local cf, half = part.CFrame, part.Size / 2
+					for ix = -1, 1, 2 do
+						for iy = -1, 1, 2 do
+							for iz = -1, 1, 2 do
+								local lp = rootCF:PointToObjectSpace(cf:PointToWorldSpace(Vector3.new(half.X * ix, half.Y * iy, half.Z * iz)))
+								any = true
+								if lp.X < loX then loX = lp.X end
+								if lp.Y < loY then loY = lp.Y end
+								if lp.Z < loZ then loZ = lp.Z end
+								if lp.X > hiX then hiX = lp.X end
+								if lp.Y > hiY then hiY = lp.Y end
+								if lp.Z > hiZ then hiZ = lp.Z end
+							end
+						end
+					end
+				end
+			end
+			if not any then
+				return 0
+			end
+			for c = 0, 7 do
+				local lx = bit32.band(c, 1) == 0 and loX or hiX
+				local ly = bit32.band(c, 2) == 0 and loY or hiY
+				local lz = bit32.band(c, 4) == 0 and loZ or hiZ
+				local x, y, visible = project(rootCF:PointToWorldSpace(Vector3.new(lx, ly, lz)))
+				if not visible then
+					return 0
+				end
+				cornerX[c + 1], cornerY[c + 1] = x, y
+			end
+			for i, e in ipairs(EDGES3D) do
+				setSeg(i, cornerX[e[1]], cornerY[e[1]], cornerX[e[2]], cornerY[e[2]])
+			end
+			return #EDGES3D
+		end
+
+		-- 2D boxes (Full / Corners): screen-space bounds of every body part
+		local minX, minY = math.huge, math.huge
+		local maxX, maxY = -math.huge, -math.huge
+		local any = false
+		for _, name in ipairs(parts) do
+			local part = char:FindFirstChild(name)
+			if part then
+				local cf, half = part.CFrame, part.Size / 2
+				for ix = -1, 1, 2 do
+					for iy = -1, 1, 2 do
+						for iz = -1, 1, 2 do
+							local x, y, visible = project(cf:PointToWorldSpace(Vector3.new(half.X * ix, half.Y * iy, half.Z * iz)))
+							if visible then
+								any = true
+								if x < minX then minX = x end
+								if y < minY then minY = y end
+								if x > maxX then maxX = x end
+								if y > maxY then maxY = y end
+							end
+						end
+					end
+				end
+			end
+		end
+		if not any then
+			return 0
+		end
+
+		local x0, y0, x1, y1 = minX - PAD, minY - PAD, maxX + PAD, maxY + PAD
+		if style == "Corners" then
+			local cw = math.min((maxX - minX) * 0.25, 12)
+			local ch = math.min((maxY - minY) * 0.25, 12)
+			setSeg(1, x0, y0, x0 + cw, y0)
+			setSeg(2, x0, y0, x0, y0 + ch)
+			setSeg(3, x1, y0, x1 - cw, y0)
+			setSeg(4, x1, y0, x1, y0 + ch)
+			setSeg(5, x0, y1, x0 + cw, y1)
+			setSeg(6, x0, y1, x0, y1 - ch)
+			setSeg(7, x1, y1, x1 - cw, y1)
+			setSeg(8, x1, y1, x1, y1 - ch)
+			return 8
+		end
+		setSeg(1, x0, y0, x1, y0)
+		setSeg(2, x0, y1, x1, y1)
+		setSeg(3, x0, y0, x0, y1)
+		setSeg(4, x1, y0, x1, y1)
+		return 4
+	end
+
+	return function(ctx)
+		local page = ctx.pages["Visuals"]
+		local fadeInfo = ctx.fadeInfo
+		local slideInfo = ctx.slideInfo or ctx.fadeInfo
+		local popup = ctx.popup
+
+		-- ====================================================
+		-- state
+		-- ====================================================
+		local enabled = false
+		local style = "Full"
+		local h, s, v = 0, 0, 180 / 255 -- default color (180, 180, 180)
+		local color = Color3.fromHSV(h, s, v)
+		local styleVersion = 0
+
+		local hasDrawing = typeof(Drawing) == "table" or (Drawing ~= nil and Drawing.new ~= nil)
+		if not hasDrawing then
+			warn("[boxesp] Drawing library not available - only the preview will work")
+		end
+
+		-- ====================================================
+		-- Visuals page row: label + switch
+		-- ====================================================
+		local row = Instance.new("Frame")
+		row.Name = "BoxEspRow"
+		row.Position = UDim2.fromOffset(20, 66)
+		row.Size = UDim2.new(1, -40, 0, 48)
+		row.BackgroundColor3 = Color3.fromRGB(28, 28, 32)
+		row.BorderSizePixel = 0
+		row.Parent = page
+		addCorner(row)
+		addStroke(row, Color3.fromRGB(42, 42, 47))
+
+		local label = Instance.new("TextLabel")
+		label.BackgroundTransparency = 1
+		label.Position = UDim2.fromOffset(16, 0)
+		label.Size = UDim2.new(0.5, 0, 1, 0)
+		label.Font = Enum.Font.GothamMedium
+		label.Text = "Box Esp"
+		label.TextColor3 = TEXT_MAIN
+		label.TextSize = 14
+		label.TextXAlignment = Enum.TextXAlignment.Left
+		label.Parent = row
+
+		local ON_TRACK = Color3.fromRGB(225, 225, 232)
+		local OFF_TRACK = Color3.fromRGB(44, 44, 50)
+		local ON_KNOB = Color3.fromRGB(22, 22, 25)
+		local OFF_KNOB = Color3.fromRGB(140, 140, 146)
+
+		local switch = Instance.new("TextButton")
+		switch.Name = "BoxEspSwitch"
+		switch.AnchorPoint = Vector2.new(1, 0.5)
+		switch.Position = UDim2.new(1, -12, 0.5, 0)
+		switch.Size = UDim2.fromOffset(46, 24)
+		switch.AutoButtonColor = false
+		switch.Text = ""
+		switch.BorderSizePixel = 0
+		switch.Parent = row
+		addCorner(switch, 7)
+		local switchStroke = addStroke(switch, Color3.fromRGB(60, 60, 66))
+
+		local knob = Instance.new("Frame")
+		knob.AnchorPoint = Vector2.new(0, 0.5)
+		knob.Size = UDim2.fromOffset(18, 18)
+		knob.BorderSizePixel = 0
+		knob.Parent = switch
+		addCorner(knob, 5)
+
+		local function applySwitch(animate)
+			local info = animate and fadeInfo or TweenInfo.new(0)
+			TweenService:Create(switch, info, {BackgroundColor3 = enabled and ON_TRACK or OFF_TRACK}):Play()
+			TweenService:Create(knob, info, {
+				BackgroundColor3 = enabled and ON_KNOB or OFF_KNOB,
+				Position = UDim2.new(0, enabled and 25 or 3, 0.5, 0),
+			}):Play()
+		end
+		applySwitch(false)
+
+		switch.MouseEnter:Connect(function()
+			TweenService:Create(switchStroke, fadeInfo, {Color = Color3.fromRGB(110, 110, 120)}):Play()
+		end)
+		switch.MouseLeave:Connect(function()
+			TweenService:Create(switchStroke, fadeInfo, {Color = Color3.fromRGB(60, 60, 66)}):Play()
+		end)
+
+		-- ====================================================
+		-- settings window (connected under the main window)
+		-- ====================================================
+		local SET_H, SET_GAP = 150, 6
+		local PANEL_BG = Color3.fromRGB(22, 22, 25)
+		local PANEL_STROKE = Color3.fromRGB(42, 42, 47)
+		local FIELD_STROKE = Color3.fromRGB(46, 46, 51)
+		local TEXT_DIM = Color3.fromRGB(110, 110, 116)
+		local TEXT_SOFT = Color3.fromRGB(190, 190, 196)
+
+		local settings = Instance.new("Frame")
+		settings.Name = "BoxEspSettings"
+		settings.AnchorPoint = Vector2.new(0.5, 0.5)
+		settings.Size = UDim2.new(1, 0, 0, SET_H)
+		settings.Position = UDim2.new(0.5, 0, 1, SET_GAP + SET_H / 2)
+		settings.BackgroundColor3 = PANEL_BG
+		settings.BorderSizePixel = 0
+		settings.Active = true
+		settings.Visible = false
+		settings.Parent = win.frame
+		addCorner(settings)
+		addStroke(settings, PANEL_STROKE)
+
+		local settingsScale = Instance.new("UIScale")
+		settingsScale.Scale = 0.92
+		settingsScale.Parent = settings
+
+		local function smallLabel(text, x, y)
+			local l = Instance.new("TextLabel")
+			l.BackgroundTransparency = 1
+			l.Position = UDim2.fromOffset(x, y)
+			l.Size = UDim2.new(1, -(x + 14), 0, 14)
+			l.Font = Enum.Font.GothamBold
+			l.Text = text
+			l.TextColor3 = TEXT_DIM
+			l.TextSize = 11
+			l.TextXAlignment = Enum.TextXAlignment.Left
+			l.Parent = settings
+			return l
+		end
+
+		smallLabel("BOX ESP", 14, 10)
+		local sep = Instance.new("Frame")
+		sep.BackgroundColor3 = Color3.fromRGB(38, 38, 42)
+		sep.BorderSizePixel = 0
+		sep.Position = UDim2.fromOffset(12, 32)
+		sep.Size = UDim2.new(1, -24, 0, 1)
+		sep.Parent = settings
+
+		-- ---------- color picker: saturation/value square + hue bar ----------
+		local svFrame = Instance.new("Frame")
+		svFrame.Name = "SV"
+		svFrame.Position = UDim2.fromOffset(14, 44)
+		svFrame.Size = UDim2.fromOffset(150, 92)
+		svFrame.BackgroundColor3 = Color3.fromHSV(h, 1, 1)
+		svFrame.BorderSizePixel = 0
+		svFrame.Parent = settings
+		addCorner(svFrame, 4)
+		addStroke(svFrame, FIELD_STROKE)
+
+		local white = Instance.new("Frame")
+		white.Size = UDim2.fromScale(1, 1)
+		white.BackgroundColor3 = Color3.new(1, 1, 1)
+		white.BorderSizePixel = 0
+		white.Parent = svFrame
+		addCorner(white, 4)
+		local whiteGradient = Instance.new("UIGradient")
+		whiteGradient.Transparency = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 0),
+			NumberSequenceKeypoint.new(1, 1),
+		})
+		whiteGradient.Parent = white
+
+		local black = Instance.new("Frame")
+		black.Size = UDim2.fromScale(1, 1)
+		black.BackgroundColor3 = Color3.new(0, 0, 0)
+		black.BorderSizePixel = 0
+		black.Parent = svFrame
+		addCorner(black, 4)
+		local blackGradient = Instance.new("UIGradient")
+		blackGradient.Rotation = 90
+		blackGradient.Transparency = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 1),
+			NumberSequenceKeypoint.new(1, 0),
+		})
+		blackGradient.Parent = black
+
+		local svCursor = Instance.new("Frame")
+		svCursor.AnchorPoint = Vector2.new(0.5, 0.5)
+		svCursor.Size = UDim2.fromOffset(10, 10)
+		svCursor.BackgroundTransparency = 1
+		svCursor.BorderSizePixel = 0
+		svCursor.ZIndex = 4
+		svCursor.Parent = svFrame
+		addCorner(svCursor, 1000)
+		local svCursorStroke = addStroke(svCursor, Color3.new(1, 1, 1))
+		svCursorStroke.Thickness = 2
+
+		local svHit = Instance.new("TextButton")
+		svHit.Size = UDim2.fromScale(1, 1)
+		svHit.BackgroundTransparency = 1
+		svHit.AutoButtonColor = false
+		svHit.Text = ""
+		svHit.ZIndex = 5
+		svHit.Parent = svFrame
+
+		local hueFrame = Instance.new("Frame")
+		hueFrame.Name = "Hue"
+		hueFrame.Position = UDim2.fromOffset(172, 44)
+		hueFrame.Size = UDim2.fromOffset(14, 92)
+		hueFrame.BackgroundColor3 = Color3.new(1, 1, 1)
+		hueFrame.BorderSizePixel = 0
+		hueFrame.Parent = settings
+		addCorner(hueFrame, 4)
+		addStroke(hueFrame, FIELD_STROKE)
+
+		local hueKeys = {}
+		for i = 0, 6 do
+			table.insert(hueKeys, ColorSequenceKeypoint.new(i / 6, Color3.fromHSV(i / 6 >= 1 and 0 or i / 6, 1, 1)))
+		end
+		local hueGradient = Instance.new("UIGradient")
+		hueGradient.Rotation = 90
+		hueGradient.Color = ColorSequence.new(hueKeys)
+		hueGradient.Parent = hueFrame
+
+		local hueCursor = Instance.new("Frame")
+		hueCursor.AnchorPoint = Vector2.new(0.5, 0.5)
+		hueCursor.Size = UDim2.new(1, 6, 0, 4)
+		hueCursor.BackgroundColor3 = Color3.new(1, 1, 1)
+		hueCursor.BorderSizePixel = 0
+		hueCursor.ZIndex = 4
+		hueCursor.Parent = hueFrame
+		addCorner(hueCursor, 2)
+		addStroke(hueCursor, Color3.fromRGB(20, 20, 23))
+
+		local hueHit = Instance.new("TextButton")
+		hueHit.Size = UDim2.fromScale(1, 1)
+		hueHit.BackgroundTransparency = 1
+		hueHit.AutoButtonColor = false
+		hueHit.Text = ""
+		hueHit.ZIndex = 5
+		hueHit.Parent = hueFrame
+
+		-- ---------- style buttons ----------
+		smallLabel("STYLE", 204, 42)
+
+		local styleRow = Instance.new("Frame")
+		styleRow.BackgroundTransparency = 1
+		styleRow.Position = UDim2.fromOffset(204, 60)
+		styleRow.Size = UDim2.new(1, -218, 0, 26)
+		styleRow.Parent = settings
+
+		local styleLayout = Instance.new("UIListLayout")
+		styleLayout.FillDirection = Enum.FillDirection.Horizontal
+		styleLayout.Padding = UDim.new(0, 6)
+		styleLayout.SortOrder = Enum.SortOrder.LayoutOrder
+		styleLayout.Parent = styleRow
+
+		local STYLES = {"Full", "Corners", "3D"}
+		local styleButtons, styleStrokes = {}, {}
+
+		local function refreshStyleButtons(animate)
+			local info = animate and fadeInfo or TweenInfo.new(0)
+			for name, btn in pairs(styleButtons) do
+				local selected = name == style
+				TweenService:Create(btn, info, {
+					BackgroundColor3 = selected and Color3.fromRGB(48, 48, 55) or Color3.fromRGB(28, 28, 32),
+					TextColor3 = selected and TEXT_MAIN or TEXT_SOFT,
+				}):Play()
+				TweenService:Create(styleStrokes[name], info, {
+					Color = selected and Color3.fromRGB(120, 120, 130) or FIELD_STROKE,
+				}):Play()
+			end
+		end
+
+		for i, name in ipairs(STYLES) do
+			local btn = Instance.new("TextButton")
+			btn.Name = name
+			btn.LayoutOrder = i
+			btn.Size = UDim2.new(1 / 3, -4, 1, 0)
+			btn.BackgroundColor3 = Color3.fromRGB(28, 28, 32)
+			btn.BorderSizePixel = 0
+			btn.AutoButtonColor = false
+			btn.Font = Enum.Font.GothamMedium
+			btn.Text = name
+			btn.TextColor3 = TEXT_SOFT
+			btn.TextSize = 13
+			btn.Parent = styleRow
+			addCorner(btn)
+			styleStrokes[name] = addStroke(btn, FIELD_STROKE)
+			styleButtons[name] = btn
+
+			btn.MouseButton1Click:Connect(function()
+				style = name
+				refreshStyleButtons(true)
+			end)
+		end
+		refreshStyleButtons(false)
+
+		-- ---------- color preview + hex ----------
+		smallLabel("COLOR", 204, 94)
+
+		local colorRow = Instance.new("Frame")
+		colorRow.BackgroundTransparency = 1
+		colorRow.Position = UDim2.fromOffset(204, 110)
+		colorRow.Size = UDim2.new(1, -218, 0, 26)
+		colorRow.Parent = settings
+
+		local swatch = Instance.new("Frame")
+		swatch.Size = UDim2.fromOffset(26, 26)
+		swatch.BackgroundColor3 = color
+		swatch.BorderSizePixel = 0
+		swatch.Parent = colorRow
+		addCorner(swatch)
+		addStroke(swatch, FIELD_STROKE)
+
+		local hexBox = Instance.new("TextBox")
+		hexBox.Position = UDim2.fromOffset(34, 0)
+		hexBox.Size = UDim2.new(1, -34, 1, 0)
+		hexBox.BackgroundColor3 = Color3.fromRGB(28, 28, 32)
+		hexBox.BorderSizePixel = 0
+		hexBox.ClearTextOnFocus = false
+		hexBox.Font = Enum.Font.GothamMedium
+		hexBox.Text = ""
+		hexBox.PlaceholderText = "#RRGGBB"
+		hexBox.PlaceholderColor3 = Color3.fromRGB(95, 95, 101)
+		hexBox.TextColor3 = TEXT_MAIN
+		hexBox.TextSize = 13
+		hexBox.TextXAlignment = Enum.TextXAlignment.Left
+		hexBox.Parent = colorRow
+		addCorner(hexBox)
+		local hexStroke = addStroke(hexBox, FIELD_STROKE)
+		local hexPad = Instance.new("UIPadding")
+		hexPad.PaddingLeft = UDim.new(0, 10)
+		hexPad.Parent = hexBox
+
+		local function toHex(c)
+			return string.format("#%02X%02X%02X", math.floor(c.R * 255 + 0.5), math.floor(c.G * 255 + 0.5), math.floor(c.B * 255 + 0.5))
+		end
+
+		local function refreshColor()
+			color = Color3.fromHSV(h, s, v)
+			svFrame.BackgroundColor3 = Color3.fromHSV(h, 1, 1)
+			svCursor.Position = UDim2.fromScale(s, 1 - v)
+			hueCursor.Position = UDim2.fromScale(0.5, h)
+			swatch.BackgroundColor3 = color
+			if not hexBox:IsFocused() then
+				hexBox.Text = toHex(color)
+			end
+			styleVersion += 1
+		end
+		refreshColor()
+
+		hexBox.Focused:Connect(function()
+			TweenService:Create(hexStroke, fadeInfo, {Color = Color3.fromRGB(95, 95, 104)}):Play()
+		end)
+		hexBox.FocusLost:Connect(function()
+			TweenService:Create(hexStroke, fadeInfo, {Color = FIELD_STROKE}):Play()
+			local r, g, b = hexBox.Text:match("^#?(%x%x)(%x%x)(%x%x)$")
+			if r then
+				local c = Color3.fromRGB(tonumber(r, 16), tonumber(g, 16), tonumber(b, 16))
+				h, s, v = c:ToHSV()
+				h = math.min(h, 0.999)
+				refreshColor()
+			end
+			hexBox.Text = toHex(color)
+		end)
+
+		-- ---------- dragging the picker ----------
+		local dragTarget
+		local function applyDrag()
+			if not dragTarget then
+				return
+			end
+			local m = UserInputService:GetMouseLocation()
+			if dragTarget == "sv" then
+				local ap, as = svHit.AbsolutePosition, svHit.AbsoluteSize
+				s = math.clamp((m.X - ap.X) / as.X, 0, 1)
+				v = 1 - math.clamp((m.Y - ap.Y) / as.Y, 0, 1)
+			else
+				local ap, as = hueHit.AbsolutePosition, hueHit.AbsoluteSize
+				h = math.clamp((m.Y - ap.Y) / as.Y, 0, 0.999)
+			end
+			refreshColor()
+		end
+
+		local function isPress(input)
+			return input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch
+		end
+
+		svHit.InputBegan:Connect(function(input)
+			if isPress(input) then
+				dragTarget = "sv"
+				applyDrag()
+			end
+		end)
+		hueHit.InputBegan:Connect(function(input)
+			if isPress(input) then
+				dragTarget = "hue"
+				applyDrag()
+			end
+		end)
+		local moveConn = UserInputService.InputChanged:Connect(function(input)
+			if dragTarget and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+				applyDrag()
+			end
+		end)
+		local endConn = UserInputService.InputEnded:Connect(function(input)
+			if isPress(input) then
+				dragTarget = nil
+			end
+		end)
+
+		-- ---------- show / hide the settings window ----------
+		local settingsShown = false
+		local function updateSettings()
+			local wanted = enabled and page.Visible
+			if wanted ~= settingsShown then
+				settingsShown = wanted
+				if wanted then
+					settings.Visible = true
+					TweenService:Create(settingsScale, slideInfo, {Scale = 1}):Play()
+				else
+					local out = TweenService:Create(settingsScale, fadeInfo, {Scale = 0.92})
+					out.Completed:Connect(function()
+						if not settingsShown then
+							settings.Visible = false
+						end
+					end)
+					out:Play()
+				end
+			end
+
+			-- sit under the window, or flip above it if the screen has no room
+			if settings.Visible then
+				local p, sz = win.frame.AbsolutePosition, win.frame.AbsoluteSize
+				local below = p.Y + sz.Y + SET_GAP + SET_H <= win.gui.AbsoluteSize.Y
+				settings.Position = below
+					and UDim2.new(0.5, 0, 1, SET_GAP + SET_H / 2)
+					or UDim2.new(0.5, 0, 0, -(SET_GAP + SET_H / 2))
+			end
+		end
+
+		-- ====================================================
+		-- preview on the 3D avatar render (GUI lines inside the viewport)
+		-- ====================================================
+		local previewViewport
+		local previewLines = {}
+
+		local function findViewport()
+			if previewViewport and previewViewport.Parent then
+				return previewViewport
+			end
+			previewViewport = popup and popup:FindFirstChildWhichIsA("ViewportFrame", true) or nil
+			return previewViewport
+		end
+
+		local function hidePreview()
+			for _, l in ipairs(previewLines) do
+				l.Visible = false
+			end
+		end
+
+		local function drawPreview(count)
+			for i = 1, count do
+				local l = previewLines[i]
+				if not l then
+					l = Instance.new("Frame")
+					l.Name = "BoxEspLine"
+					l.AnchorPoint = Vector2.new(0.5, 0.5)
+					l.BorderSizePixel = 0
+					l.Active = false
+					l.ZIndex = 20
+					l.Visible = false
+					previewLines[i] = l
+				end
+				if l.Parent ~= previewViewport then
+					l.Parent = previewViewport
+				end
+				local sg = segs[i]
+				local dx, dy = sg[3] - sg[1], sg[4] - sg[2]
+				local len = math.sqrt(dx * dx + dy * dy)
+				l.BackgroundColor3 = color
+				l.Position = UDim2.fromOffset((sg[1] + sg[3]) / 2, (sg[2] + sg[4]) / 2)
+				l.Size = UDim2.fromOffset(len + THICKNESS, THICKNESS)
+				l.Rotation = math.deg(math.atan2(dy, dx))
+				l.Visible = true
+			end
+			for i = count + 1, #previewLines do
+				previewLines[i].Visible = false
+			end
+		end
+
+		local function updatePreview()
+			local viewport = findViewport()
+			if not (enabled and popup and popup.Visible and viewport) then
+				hidePreview()
+				return
+			end
+			local camera = viewport.CurrentCamera
+			local model = viewport:FindFirstChildOfClass("Model")
+			if not (camera and model) then
+				hidePreview()
+				return
+			end
+			local uiScale = popup:FindFirstChildOfClass("UIScale")
+			local vpSize = viewport.AbsoluteSize / (uiScale and uiScale.Scale or 1)
+			if vpSize.X < 1 or vpSize.Y < 1 then
+				hidePreview()
+				return
+			end
+			drawPreview(computeSegments(model, makeProjector(camera, vpSize), style))
+		end
+
+		-- ====================================================
+		-- real ESP (only while the menu is hidden)
+		-- ====================================================
+		local boxes = {} -- [player] = {lines = {}, shown = 0, version = n}
+
+		local function newLine()
+			local l = Drawing.new("Line")
+			l.Color = color
+			l.Thickness = THICKNESS
+			l.Visible = false
+			return l
+		end
+
+		local function removeBox(player)
+			local rec = boxes[player]
+			if not rec then
+				return
+			end
+			for _, l in ipairs(rec.lines) do
+				pcall(function() l:Remove() end)
+			end
+			boxes[player] = nil
+		end
+
+		local function getBox(player)
+			local rec = boxes[player]
+			if not rec then
+				rec = {lines = {}, shown = 0, version = styleVersion}
+				boxes[player] = rec
+			end
+			return rec
+		end
+
+		local function hideAll()
+			for _, rec in pairs(boxes) do
+				for i = 1, rec.shown do
+					rec.lines[i].Visible = false
+				end
+				rec.shown = 0
+			end
+		end
+
+		local function drawBox(rec, count)
+			local lines = rec.lines
+			while #lines < count do
+				table.insert(lines, newLine())
+			end
+			if rec.version ~= styleVersion then
+				rec.version = styleVersion
+				for _, l in ipairs(lines) do
+					l.Color = color
+				end
+			end
+			for i = 1, count do
+				local sg, l = segs[i], lines[i]
+				l.From = Vector2.new(sg[1], sg[2])
+				l.To = Vector2.new(sg[3], sg[4])
+				l.Visible = true
+			end
+			for i = count + 1, rec.shown do
+				lines[i].Visible = false
+			end
+			rec.shown = count
+		end
+
+		local wasActive = false
+		local function updateEsp()
+			-- menu open -> nothing on the real players
+			local active = hasDrawing and enabled and win.gui.Parent ~= nil and not win.gui.Enabled
+			if not active then
+				if wasActive then
+					hideAll()
+					wasActive = false
+				end
+				return
+			end
+			wasActive = true
+
+			local camera = workspace.CurrentCamera
+			if not camera then
+				return
+			end
+			local project = makeProjector(camera)
+			for _, player in ipairs(Players:GetPlayers()) do
+				if player ~= LocalPlayer then
+					local char = player.Character
+					local hum = char and char:FindFirstChildOfClass("Humanoid")
+					local count = 0
+					if char and hum and hum.Health > 0 then
+						count = computeSegments(char, project, style)
+					end
+					if count > 0 or boxes[player] then
+						drawBox(getBox(player), count)
+					end
+				end
+			end
+		end
+
+		local renderConn = RunService.RenderStepped:Connect(function()
+			updateSettings()
+			updatePreview()
+			updateEsp()
+		end)
+		local removingConn = Players.PlayerRemoving:Connect(removeBox)
+
+		switch.MouseButton1Click:Connect(function()
+			enabled = not enabled
+			applySwitch(true)
+		end)
+
+		local function destroy()
+			renderConn:Disconnect()
+			removingConn:Disconnect()
+			moveConn:Disconnect()
+			endConn:Disconnect()
+			for player in pairs(boxes) do
+				removeBox(player)
+			end
+			for _, l in ipairs(previewLines) do
+				l:Destroy()
+			end
+			settings:Destroy()
+		end
+		win.onClose(destroy)
+
+		return {
+			SetEnabled = function(value)
+				enabled = value and true or false
+				applySwitch(true)
+			end,
+			IsEnabled = function()
+				return enabled
+			end,
+			SetStyle = function(name)
+				if table.find(STYLES, name) then
+					style = name
+					refreshStyleButtons(true)
+				end
+			end,
+			SetColor = function(c)
+				h, s, v = c:ToHSV()
+				h = math.min(h, 0.999)
+				refreshColor()
+			end,
+			Destroy = destroy,
+		}
+	end
+end-- boxesp module (Visuals tab)
 -- usage in the main script:
 --   local buildBoxEsp = loadstring(game:HttpGet(BOXESP_URL))()(lib)
 --   local boxEsp = buildBoxEsp({pages = pages, fadeInfo = fadeInfo, slideInfo = slideInfo, popup = popup})
