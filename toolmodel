@@ -3,25 +3,59 @@
 -- Returns: builder(opts) → nil
 
 return function(lib)
-	local Players      = lib.Players
-	local TweenService = lib.TweenService
-	local RunService   = lib.RunService
-	local TEXT_MAIN    = lib.TEXT_MAIN
-	local addCorner    = lib.addCorner
-	local addStroke    = lib.addStroke
-	local win          = lib.win
+	local Players          = lib.Players
+	local TweenService     = lib.TweenService
+	local RunService       = lib.RunService
+	local UserInputService = lib.UserInputService
+	local TEXT_MAIN        = lib.TEXT_MAIN
+	local addCorner        = lib.addCorner
+	local addStroke        = lib.addStroke
+	local win              = lib.win
 
 	return function(opts)
-		local pages    = opts.pages
-		local fadeInfo = opts.fadeInfo
+		local pages     = opts.pages
+		local fadeInfo  = opts.fadeInfo
 		local slideInfo = opts.slideInfo
 
-		local page  = pages["Tools"]
-		local lp    = Players.LocalPlayer
+		local page = pages["Tools"]
+		local lp   = Players.LocalPlayer
 
 		local TEXT_DIM  = Color3.fromRGB(130, 130, 136)
 		local TEXT_SOFT = Color3.fromRGB(190, 190, 196)
 		local CARD_BG   = Color3.fromRGB(22, 22, 25)
+		local TRACK     = Color3.fromRGB(44, 44, 50)
+		local WHITE     = Color3.fromRGB(225, 225, 232)
+
+		local conns = {}
+
+		-- ============================================================
+		-- mouse position in AbsolutePosition space (self-corrects a top-bar offset)
+		-- ============================================================
+		local GuiService  = game:GetService("GuiService")
+		local mouseOffset = Vector2.zero
+
+		local function mousePos()
+			return UserInputService:GetMouseLocation() + mouseOffset
+		end
+
+		local function inside(pos, obj)
+			local p, sz = obj.AbsolutePosition, obj.AbsoluteSize
+			return pos.X >= p.X and pos.X <= p.X + sz.X and pos.Y >= p.Y and pos.Y <= p.Y + sz.Y
+		end
+
+		local function calibrate(obj)
+			if inside(mousePos(), obj) then
+				return
+			end
+			local raw = UserInputService:GetMouseLocation()
+			local inset = GuiService:GetGuiInset().Y
+			for _, dy in ipairs({inset, -inset, 36, -36, 58, -58}) do
+				if dy ~= 0 and inside(raw + Vector2.new(0, dy), obj) then
+					mouseOffset = Vector2.new(0, dy)
+					return
+				end
+			end
+		end
 
 		-- ============================================================
 		-- empty-state label (shown when no tool is equipped)
@@ -120,33 +154,475 @@ return function(lib)
 		subLabel.ZIndex  = 3
 
 		-- ============================================================
-		-- camera orbit helpers
+		-- GUN MODS: side panel for specific guns
+		-- ============================================================
+		local GUNS = {
+			["[Revolver]"]         = true,
+			["[Double-Barrel SG]"] = true,
+			["[TacticalShotgun]"]  = true,
+		}
+
+		local RATE_MIN, RATE_MAX = 1, 100
+		local rate     = 15
+		local rapidOn  = false
+		local noSlowOn = false
+
+		local activeGun
+		local gunConns = {}
+		local mouseHeld, firing = false, false
+		local fireAcc = 0
+		local lastAction = 0
+		local baseSpeed
+
+		local SIDE_W, SIDE_GAP = 260, 8
+
+		local panel = Instance.new("Frame")
+		panel.Name = "GunModsPanel"
+		panel.AnchorPoint = Vector2.new(0.5, 0.5)
+		panel.Size = UDim2.new(0, SIDE_W, 1, 0)
+		panel.Position = UDim2.new(1, SIDE_GAP + SIDE_W / 2, 0.5, 0)
+		panel.BackgroundColor3 = CARD_BG
+		panel.BorderSizePixel = 0
+		panel.Visible = false
+		panel.Parent = win.frame
+		addCorner(panel)
+		addStroke(panel, Color3.fromRGB(42, 42, 47))
+
+		local panelScale = Instance.new("UIScale")
+		panelScale.Scale = 0.92
+		panelScale.Parent = panel
+
+		-- header
+		local panelTitle = Instance.new("TextLabel")
+		panelTitle.BackgroundTransparency = 1
+		panelTitle.Position = UDim2.fromOffset(14, 9)
+		panelTitle.Size = UDim2.new(0.4, 0, 0, 22)
+		panelTitle.Font = Enum.Font.GothamBold
+		panelTitle.Text = "GUN MODS"
+		panelTitle.TextColor3 = Color3.fromRGB(110, 110, 116)
+		panelTitle.TextSize = 11
+		panelTitle.TextXAlignment = Enum.TextXAlignment.Left
+		panelTitle.Parent = panel
+
+		local panelGun = Instance.new("TextLabel")
+		panelGun.BackgroundTransparency = 1
+		panelGun.AnchorPoint = Vector2.new(1, 0)
+		panelGun.Position = UDim2.new(1, -14, 0, 9)
+		panelGun.Size = UDim2.new(0.55, 0, 0, 22)
+		panelGun.Font = Enum.Font.GothamMedium
+		panelGun.Text = ""
+		panelGun.TextColor3 = TEXT_SOFT
+		panelGun.TextSize = 12
+		panelGun.TextXAlignment = Enum.TextXAlignment.Right
+		panelGun.TextTruncate = Enum.TextTruncate.AtEnd
+		panelGun.Parent = panel
+
+		local panelDivider = Instance.new("Frame")
+		panelDivider.BackgroundColor3 = Color3.fromRGB(38, 38, 42)
+		panelDivider.BorderSizePixel = 0
+		panelDivider.Position = UDim2.fromOffset(12, 40)
+		panelDivider.Size = UDim2.new(1, -24, 0, 1)
+		panelDivider.Parent = panel
+
+		-- ---------- vertical fire-rate slider (left column) ----------
+		local sliderArea = Instance.new("Frame")
+		sliderArea.BackgroundTransparency = 1
+		sliderArea.Position = UDim2.fromOffset(14, 52)
+		sliderArea.Size = UDim2.new(0, 96, 1, -66)
+		sliderArea.Parent = panel
+
+		local rateValue = Instance.new("TextLabel")
+		rateValue.BackgroundTransparency = 1
+		rateValue.Size = UDim2.new(1, 0, 0, 20)
+		rateValue.Font = Enum.Font.GothamBold
+		rateValue.TextColor3 = TEXT_MAIN
+		rateValue.TextSize = 15
+		rateValue.Parent = sliderArea
+
+		local track = Instance.new("Frame")
+		track.AnchorPoint = Vector2.new(0.5, 0)
+		track.Position = UDim2.new(0.5, 0, 0, 30)
+		track.Size = UDim2.new(0, 6, 1, -(30 + 26))
+		track.BackgroundColor3 = TRACK
+		track.BorderSizePixel = 0
+		track.Parent = sliderArea
+		addCorner(track, 3)
+
+		local fill = Instance.new("Frame")
+		fill.AnchorPoint = Vector2.new(0, 1)
+		fill.Position = UDim2.fromScale(0, 1)
+		fill.Size = UDim2.fromScale(1, 0)
+		fill.BackgroundColor3 = WHITE
+		fill.BorderSizePixel = 0
+		fill.Parent = track
+		addCorner(fill, 3)
+
+		local knob = Instance.new("Frame")
+		knob.AnchorPoint = Vector2.new(0.5, 0.5)
+		knob.Size = UDim2.fromOffset(16, 16)
+		knob.BackgroundColor3 = Color3.fromRGB(245, 245, 248)
+		knob.BorderSizePixel = 0
+		knob.ZIndex = 2
+		knob.Parent = track
+		addCorner(knob, 8)
+
+		local rateCaption = Instance.new("TextLabel")
+		rateCaption.BackgroundTransparency = 1
+		rateCaption.AnchorPoint = Vector2.new(0, 1)
+		rateCaption.Position = UDim2.fromScale(0, 1)
+		rateCaption.Size = UDim2.new(1, 0, 0, 18)
+		rateCaption.Font = Enum.Font.GothamMedium
+		rateCaption.Text = "Fire rate"
+		rateCaption.TextColor3 = TEXT_DIM
+		rateCaption.TextSize = 12
+		rateCaption.Parent = sliderArea
+
+		local function setRate(v)
+			rate = math.clamp(math.floor(v + 0.5), RATE_MIN, RATE_MAX)
+			local a = (rate - RATE_MIN) / (RATE_MAX - RATE_MIN)
+			fill.Size = UDim2.fromScale(1, a)
+			knob.Position = UDim2.fromScale(0.5, 1 - a)
+			rateValue.Text = rate .. "/s"
+		end
+		setRate(rate)
+
+		local sliderHit = Instance.new("TextButton")
+		sliderHit.BackgroundTransparency = 1
+		sliderHit.Text = ""
+		sliderHit.AutoButtonColor = false
+		sliderHit.AnchorPoint = Vector2.new(0.5, 0)
+		sliderHit.Position = UDim2.new(0.5, 0, 0, 24)
+		sliderHit.Size = UDim2.new(0, 44, 1, -(24 + 20))
+		sliderHit.ZIndex = 3
+		sliderHit.Parent = sliderArea
+
+		local draggingRate = false
+		local function rateFromMouse()
+			local h = track.AbsoluteSize.Y
+			if h <= 0 then
+				return
+			end
+			local fromTop = math.clamp((mousePos().Y - track.AbsolutePosition.Y) / h, 0, 1)
+			setRate(RATE_MIN + (1 - fromTop) * (RATE_MAX - RATE_MIN))
+		end
+
+		sliderHit.InputBegan:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+				draggingRate = true
+				rateFromMouse()
+			end
+		end)
+		table.insert(conns, UserInputService.InputChanged:Connect(function(input)
+			if draggingRate and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+				rateFromMouse()
+			end
+		end))
+		table.insert(conns, UserInputService.InputEnded:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+				draggingRate = false
+			end
+		end))
+
+		-- ---------- toggles (right column) ----------
+		local function makeToggle(labelText, y, onChange)
+			local row = Instance.new("Frame")
+			row.Position = UDim2.fromOffset(122, y)
+			row.Size = UDim2.new(1, -136, 0, 58)
+			row.BackgroundColor3 = Color3.fromRGB(28, 28, 32)
+			row.BorderSizePixel = 0
+			row.Parent = panel
+			addCorner(row)
+			addStroke(row, Color3.fromRGB(42, 42, 47))
+
+			local label = Instance.new("TextLabel")
+			label.BackgroundTransparency = 1
+			label.Position = UDim2.fromOffset(10, 6)
+			label.Size = UDim2.new(1, -20, 0, 16)
+			label.Font = Enum.Font.GothamMedium
+			label.Text = labelText
+			label.TextColor3 = TEXT_SOFT
+			label.TextSize = 12
+			label.TextXAlignment = Enum.TextXAlignment.Left
+			label.Parent = row
+
+			local switch = Instance.new("TextButton")
+			switch.Position = UDim2.fromOffset(10, 28)
+			switch.Size = UDim2.fromOffset(46, 24)
+			switch.AutoButtonColor = false
+			switch.Text = ""
+			switch.BorderSizePixel = 0
+			switch.Parent = row
+			addCorner(switch, 7)
+			local stroke = addStroke(switch, Color3.fromRGB(60, 60, 66))
+
+			local knobS = Instance.new("Frame")
+			knobS.AnchorPoint = Vector2.new(0, 0.5)
+			knobS.Size = UDim2.fromOffset(18, 18)
+			knobS.BorderSizePixel = 0
+			knobS.Parent = switch
+			addCorner(knobS, 5)
+
+			local isOn = false
+			local function apply(animate)
+				local info = animate and fadeInfo or TweenInfo.new(0)
+				TweenService:Create(switch, info, {BackgroundColor3 = isOn and WHITE or TRACK}):Play()
+				TweenService:Create(knobS, info, {
+					BackgroundColor3 = isOn and Color3.fromRGB(22, 22, 25) or Color3.fromRGB(140, 140, 146),
+					Position = UDim2.new(0, isOn and 25 or 3, 0.5, 0),
+				}):Play()
+			end
+			apply(false)
+
+			switch.MouseEnter:Connect(function()
+				TweenService:Create(stroke, fadeInfo, {Color = Color3.fromRGB(110, 110, 120)}):Play()
+			end)
+			switch.MouseLeave:Connect(function()
+				TweenService:Create(stroke, fadeInfo, {Color = Color3.fromRGB(60, 60, 66)}):Play()
+			end)
+			switch.MouseButton1Click:Connect(function()
+				calibrate(switch)
+				isOn = not isOn
+				apply(true)
+				onChange(isOn)
+			end)
+		end
+
+		makeToggle("Rapid fire", 52, function(on)
+			rapidOn = on
+			if not on then
+				firing = false
+			end
+		end)
+		makeToggle("No slowdown", 120, function(on)
+			noSlowOn = on
+			baseSpeed = nil
+		end)
+
+		local hint = Instance.new("TextLabel")
+		hint.BackgroundTransparency = 1
+		hint.Position = UDim2.fromOffset(122, 190)
+		hint.Size = UDim2.new(1, -136, 0, 48)
+		hint.Font = Enum.Font.Gotham
+		hint.Text = "Hold left mouse to fire at the set rate."
+		hint.TextColor3 = Color3.fromRGB(90, 90, 96)
+		hint.TextSize = 11
+		hint.TextWrapped = true
+		hint.TextXAlignment = Enum.TextXAlignment.Left
+		hint.TextYAlignment = Enum.TextYAlignment.Top
+		hint.Parent = panel
+
+		local statusLabel = Instance.new("TextLabel")
+		statusLabel.BackgroundTransparency = 1
+		statusLabel.AnchorPoint = Vector2.new(0, 1)
+		statusLabel.Position = UDim2.new(0, 122, 1, -14)
+		statusLabel.Size = UDim2.new(1, -136, 0, 16)
+		statusLabel.Font = Enum.Font.Gotham
+		statusLabel.Text = ""
+		statusLabel.TextColor3 = Color3.fromRGB(235, 90, 90)
+		statusLabel.TextSize = 11
+		statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+		statusLabel.Parent = panel
+
+		-- the game's own gun module (used for the rapid-fire shots)
+		local gunHandler
+		task.spawn(function()
+			local ok, result = pcall(function()
+				local rs = game:GetService("ReplicatedStorage")
+				return require(rs.Modules.GunHandler)
+			end)
+			if ok and result then
+				gunHandler = result
+			else
+				statusLabel.Text = "GunHandler not found"
+			end
+		end)
+
+		-- ---------- show / hide the panel ----------
+		local panelShown = false
+		local function updatePanel()
+			local want = activeGun ~= nil and page.Visible
+			if activeGun then
+				panelGun.Text = activeGun.Name
+			end
+			if want == panelShown then
+				return
+			end
+			panelShown = want
+			if want then
+				panel.Visible = true
+				TweenService:Create(panelScale, slideInfo, {Scale = 1}):Play()
+			else
+				local out = TweenService:Create(panelScale, fadeInfo, {Scale = 0.92})
+				out.Completed:Connect(function()
+					if not panelShown then
+						panel.Visible = false
+					end
+				end)
+				out:Play()
+			end
+		end
+
+		page:GetPropertyChangedSignal("Visible"):Connect(updatePanel)
+
+		-- sit on the right of the window, flip left if there's no room
+		table.insert(conns, RunService.RenderStepped:Connect(function()
+			if not panel.Visible then
+				return
+			end
+			local p, sz = win.frame.AbsolutePosition, win.frame.AbsoluteSize
+			local roomRight = p.X + sz.X + SIDE_GAP + SIDE_W <= win.gui.AbsoluteSize.X
+			panel.Position = roomRight
+				and UDim2.new(1, SIDE_GAP + SIDE_W / 2, 0.5, 0)
+				or UDim2.new(0, -(SIDE_GAP + SIDE_W / 2), 0.5, 0)
+		end))
+
+		-- ---------- which gun is equipped ----------
+		local function clearGunConns()
+			for _, c in ipairs(gunConns) do
+				c:Disconnect()
+			end
+			table.clear(gunConns)
+		end
+
+		local function setActiveGun(tool)
+			clearGunConns()
+			if tool and GUNS[tool.Name] then
+				activeGun = tool
+				baseSpeed = nil
+				table.insert(gunConns, tool.Activated:Connect(function()
+					lastAction = os.clock()
+				end))
+				local ammo = tool:FindFirstChild("Ammo")
+				if ammo and ammo:IsA("ValueBase") then
+					table.insert(gunConns, ammo.Changed:Connect(function()
+						lastAction = os.clock() -- ammo changing = shooting or reloading
+					end))
+				end
+			else
+				activeGun = nil
+				firing = false
+				mouseHeld = false
+			end
+			updatePanel()
+		end
+
+		-- ---------- rapid fire + no slowdown ----------
+		table.insert(conns, UserInputService.InputBegan:Connect(function(input, gp)
+			if gp or not activeGun then
+				return
+			end
+			if input.UserInputType == Enum.UserInputType.MouseButton1 then
+				mouseHeld = true
+				if rapidOn then
+					firing = true
+					fireAcc = 0
+				end
+			elseif input.KeyCode == Enum.KeyCode.R then
+				lastAction = os.clock() -- reload
+			end
+		end))
+		table.insert(conns, UserInputService.InputEnded:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1 then
+				mouseHeld = false
+				firing = false
+			end
+		end))
+
+		local function shoot()
+			if gunHandler then
+				pcall(gunHandler.Shoot, gunHandler)
+			end
+			pcall(function()
+				activeGun:Activate()
+			end)
+		end
+
+		table.insert(conns, RunService.Heartbeat:Connect(function(dt)
+			local gun = activeGun
+			if not gun or gun.Parent ~= lp.Character then
+				return
+			end
+			local now = os.clock()
+			if mouseHeld then
+				lastAction = now
+			end
+
+			-- no slowdown: while shooting/reloading, keep the speed you had before
+			if noSlowOn then
+				local hum = lp.Character and lp.Character:FindFirstChildOfClass("Humanoid")
+				if hum then
+					if now - lastAction > 3 then
+						baseSpeed = hum.WalkSpeed
+					elseif baseSpeed and hum.WalkSpeed < baseSpeed then
+						hum.WalkSpeed = baseSpeed
+					end
+				end
+			end
+
+			-- rapid fire: `rate` shots per second while the mouse is held
+			if firing and rapidOn then
+				local interval = 1 / rate
+				fireAcc += dt
+				local n = 0
+				while fireAcc >= interval and n < 10 do
+					shoot()
+					fireAcc -= interval
+					n += 1
+				end
+				if n == 10 then
+					fireAcc = 0
+				end
+			end
+		end))
+
+		-- ============================================================
+		-- bounds + camera helpers
 		-- ============================================================
 		local angle   = 0
 		local ORBIT_R = 4   -- camera distance (adjusted per tool size)
 		local ORBIT_Y = 1.2 -- height above the tool's centre
 
-		local function fitCamera(clone)
-			-- compute bounding box of the cloned tool
-			local minP =  Vector3.new(math.huge,  math.huge,  math.huge)
-			local maxP =  Vector3.new(-math.huge, -math.huge, -math.huge)
-			for _, part in ipairs(clone:GetDescendants()) do
-				if part:IsA("BasePart") then
-					local s = part.Size / 2
-					local cf = part.CFrame
-					for _, corner in ipairs({
-						Vector3.new( s.X,  s.Y,  s.Z), Vector3.new(-s.X,  s.Y,  s.Z),
-						Vector3.new( s.X, -s.Y,  s.Z), Vector3.new(-s.X, -s.Y,  s.Z),
-						Vector3.new( s.X,  s.Y, -s.Z), Vector3.new(-s.X,  s.Y, -s.Z),
-						Vector3.new( s.X, -s.Y, -s.Z), Vector3.new(-s.X, -s.Y, -s.Z),
-					}) do
-						local w = (cf * CFrame.new(corner)).Position
-						minP = Vector3.new(math.min(minP.X,w.X), math.min(minP.Y,w.Y), math.min(minP.Z,w.Z))
-						maxP = Vector3.new(math.max(maxP.X,w.X), math.max(maxP.Y,w.Y), math.max(maxP.Z,w.Z))
+		-- bounding box of the *visible* parts only (ignores invisible hitboxes
+		-- and giant effect parts that would stretch the box and push the camera away)
+		local function getBounds(model)
+			local function scan(onlyVisible)
+				local minP = Vector3.new(math.huge, math.huge, math.huge)
+				local maxP = Vector3.new(-math.huge, -math.huge, -math.huge)
+				local found = false
+				for _, part in ipairs(model:GetDescendants()) do
+					if part:IsA("BasePart") then
+						local big = math.max(part.Size.X, part.Size.Y, part.Size.Z)
+						if not onlyVisible or (part.Transparency < 0.95 and big < 30) then
+							local s = part.Size / 2
+							for _, sx in ipairs({-1, 1}) do
+								for _, sy in ipairs({-1, 1}) do
+									for _, sz in ipairs({-1, 1}) do
+										local w = part.CFrame:PointToWorldSpace(Vector3.new(s.X * sx, s.Y * sy, s.Z * sz))
+										minP = Vector3.new(math.min(minP.X, w.X), math.min(minP.Y, w.Y), math.min(minP.Z, w.Z))
+										maxP = Vector3.new(math.max(maxP.X, w.X), math.max(maxP.Y, w.Y), math.max(maxP.Z, w.Z))
+									end
+								end
+							end
+							found = true
+						end
 					end
 				end
+				return found, minP, maxP
 			end
-			local size = (maxP - minP).Magnitude
+
+			local found, minP, maxP = scan(true)
+			if not found then
+				found, minP, maxP = scan(false) -- nothing visible, fall back to every part
+			end
+			if not found then
+				return Vector3.new(-1, -1, -1), Vector3.new(1, 1, 1)
+			end
+			return minP, maxP
+		end
+
+		local function fitCamera(clone)
+			local minP, maxP = getBounds(clone)
+			local size = math.clamp((maxP - minP).Magnitude, 0.5, 20)
 			ORBIT_R = math.max(2.5, size * 1.4)
 			ORBIT_Y = (minP.Y + maxP.Y) / 2 + size * 0.12
 		end
@@ -157,19 +633,41 @@ return function(lib)
 		local toolClone
 		local toolCentre = Vector3.zero
 		local orbitConn
+		local loadToken = 0 -- bumped on every load/clear so stale loads can cancel themselves
 
-		local function clearTool()
+		local function removeClone()
 			if orbitConn then orbitConn:Disconnect(); orbitConn = nil end
 			if toolClone then toolClone:Destroy(); toolClone = nil end
-			card.Visible      = false
+		end
+
+		local function clearTool()
+			loadToken += 1
+			removeClone()
+			setActiveGun(nil)
+			card.Visible       = false
 			emptyLabel.Visible = true
-			nameLabel.Text    = ""
-			subLabel.Text     = ""
+			nameLabel.Text     = ""
+			subLabel.Text      = ""
 		end
 
 		local function loadTool(tool)
-			clearTool()
-			if not tool then return end
+			if not tool then
+				clearTool()
+				return
+			end
+
+			loadToken += 1
+			local token = loadToken
+
+			setActiveGun(tool) -- gun mods work right away, no need to wait for the preview
+
+			-- parts can still be mid-weld right after equipping
+			task.wait(0.15)
+			if token ~= loadToken or tool.Parent ~= lp.Character then
+				return
+			end
+
+			removeClone()
 
 			-- clone into WorldModel (exclude scripts so nothing fires)
 			local clone = Instance.new("Model")
@@ -180,15 +678,16 @@ return function(lib)
 				end
 			end
 			if not next(clone:GetChildren()) then
-				clone:Destroy(); return
+				clone:Destroy()
+				return
 			end
 
 			-- zero out velocities and anchor everything
 			for _, part in ipairs(clone:GetDescendants()) do
 				if part:IsA("BasePart") then
-					part.Anchored   = true
-					part.CastShadow = false
-					part.Velocity   = Vector3.zero
+					part.Anchored    = true
+					part.CastShadow  = false
+					part.Velocity    = Vector3.zero
 					part.RotVelocity = Vector3.zero
 				end
 			end
@@ -196,19 +695,15 @@ return function(lib)
 			clone.Parent = worldModel
 			toolClone    = clone
 
-			-- centre the model at the origin
-			local ok, centre = pcall(function() return clone:GetBoundingBox() end)
-			if ok then
-				toolCentre = centre.Position
-				-- shift everything so the model is centred
-				local offset = CFrame.new(-toolCentre)
-				for _, part in ipairs(clone:GetDescendants()) do
-					if part:IsA("BasePart") then
-						part.CFrame = offset * part.CFrame
-					end
+			-- centre the model on its visible parts
+			local minP, maxP = getBounds(clone)
+			local offset = CFrame.new(-((minP + maxP) / 2))
+			for _, part in ipairs(clone:GetDescendants()) do
+				if part:IsA("BasePart") then
+					part.CFrame = offset * part.CFrame
 				end
-				toolCentre = Vector3.zero
 			end
+			toolCentre = Vector3.zero
 
 			fitCamera(clone)
 
@@ -244,10 +739,10 @@ return function(lib)
 
 			if not char then clearTool(); return end
 
-			loadTool(getEquipped(char))
+			task.spawn(loadTool, getEquipped(char))
 
 			table.insert(charConns, char.ChildAdded:Connect(function(child)
-				if child:IsA("Tool") then loadTool(child) end
+				if child:IsA("Tool") then task.spawn(loadTool, child) end
 			end))
 			table.insert(charConns, char.ChildRemoved:Connect(function(child)
 				if child:IsA("Tool") then
@@ -266,6 +761,10 @@ return function(lib)
 		win.onClose(function()
 			charAddedConn:Disconnect()
 			for _, c in ipairs(charConns) do c:Disconnect() end
+			for _, c in ipairs(conns) do c:Disconnect() end
+			table.clear(conns)
+			clearGunConns()
+			firing = false
 			clearTool()
 		end)
 	end
