@@ -1,0 +1,741 @@
+-- movement tab module
+-- usage in the main script:
+--   local buildMovementTab = loadstring(game:HttpGet(MOVEMENT_URL))()(lib)
+--   buildMovementTab({pages = pages, fadeInfo = fadeInfo, slideInfo = slideInfo})
+--
+-- Movement page (scrollable):
+--   No-Clip   switch + keybind
+--   Inf Jump  switch
+--   Speed     switch + keybind + method (Position / Velocity / Slippery) + slider
+--   Flight    switch + keybind + method (Velocity / Position) + slider
+--   Jump      switch + slider (jump power)
+--   Gravity   switch + slider
+--
+-- keybind rule: switch ON + a key set  -> the key toggles the feature (switch only arms it)
+--               switch ON + no key set -> the switch itself toggles the feature
+--               switch OFF             -> the key does nothing
+-- Flight controls: W A S D move along the camera, Space = up, Left Ctrl = down
+
+return function(lib)
+	local Players = lib.Players
+	local TweenService = lib.TweenService
+	local RunService = lib.RunService
+	local UserInputService = lib.UserInputService
+	local win = lib.win
+	local addCorner, addStroke = lib.addCorner, lib.addStroke
+	local TEXT_MAIN = lib.TEXT_MAIN
+
+	local LocalPlayer = Players.LocalPlayer
+
+	local CARD_BG = Color3.fromRGB(28, 28, 32)
+	local CARD_STROKE = Color3.fromRGB(42, 42, 47)
+	local FIELD_STROKE = Color3.fromRGB(46, 46, 51)
+	local TEXT_SOFT = Color3.fromRGB(190, 190, 196)
+	local ON_TRACK = Color3.fromRGB(225, 225, 232)
+	local OFF_TRACK = Color3.fromRGB(44, 44, 50)
+	local ON_KNOB = Color3.fromRGB(22, 22, 25)
+	local OFF_KNOB = Color3.fromRGB(140, 140, 146)
+	local DOT_ON = Color3.fromRGB(225, 225, 232)
+	local DOT_OFF = Color3.fromRGB(60, 60, 66)
+	local SEL_BG = Color3.fromRGB(48, 48, 55)
+	local SEL_STROKE = Color3.fromRGB(120, 120, 130)
+
+	local SHORT_KEYS = {
+		LeftControl = "LCtrl", RightControl = "RCtrl",
+		LeftShift = "LShift", RightShift = "RShift",
+		LeftAlt = "LAlt", RightAlt = "RAlt",
+		Return = "Enter", Backquote = "`",
+	}
+
+	return function(ctx)
+		local page = ctx.pages["Movement"]
+		local fadeInfo = ctx.fadeInfo
+
+		-- ====================================================
+		-- scrolling list of feature cards
+		-- ====================================================
+		local scroll = Instance.new("ScrollingFrame")
+		scroll.Name = "MovementList"
+		scroll.BackgroundTransparency = 1
+		scroll.BorderSizePixel = 0
+		scroll.Position = UDim2.fromOffset(14, 58)
+		scroll.Size = UDim2.new(1, -28, 1, -66)
+		scroll.CanvasSize = UDim2.new()
+		scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+		scroll.ScrollingDirection = Enum.ScrollingDirection.Y
+		scroll.ScrollBarThickness = 3
+		scroll.ScrollBarImageColor3 = Color3.fromRGB(90, 90, 98)
+		scroll.Parent = page
+
+		local scrollLayout = Instance.new("UIListLayout")
+		scrollLayout.Padding = UDim.new(0, 8)
+		scrollLayout.SortOrder = Enum.SortOrder.LayoutOrder
+		scrollLayout.Parent = scroll
+
+		local scrollPad = Instance.new("UIPadding")
+		scrollPad.PaddingRight = UDim.new(0, 6)
+		scrollPad.PaddingBottom = UDim.new(0, 6)
+		scrollPad.Parent = scroll
+
+		-- ====================================================
+		-- shared input state (slider dragging + keybind listening)
+		-- ====================================================
+		local dragFn
+		local listening -- feature currently waiting for a key
+
+		local function isPress(input)
+			return input.UserInputType == Enum.UserInputType.MouseButton1
+				or input.UserInputType == Enum.UserInputType.Touch
+		end
+
+		-- ====================================================
+		-- feature state machine
+		-- ====================================================
+		local function setActive(f, value)
+			if f.active == value then
+				return
+			end
+			f.active = value
+			if f.dot then
+				TweenService:Create(f.dot, fadeInfo, {BackgroundColor3 = value and DOT_ON or DOT_OFF}):Play()
+			end
+			if f.onChange then
+				f.onChange(value)
+			end
+		end
+
+		local function refreshFeature(f)
+			if not f.enabled then
+				setActive(f, false)
+			elseif f.hasKey and f.key then
+				setActive(f, false) -- armed: waits for the keybind
+			else
+				setActive(f, true)
+			end
+		end
+
+		local function keyText(f)
+			if not f.key then
+				return "None"
+			end
+			return SHORT_KEYS[f.key.Name] or f.key.Name
+		end
+
+		-- ====================================================
+		-- ui building blocks
+		-- ====================================================
+		local function newCard(order)
+			local card = Instance.new("Frame")
+			card.LayoutOrder = order
+			card.Size = UDim2.new(1, 0, 0, 0)
+			card.AutomaticSize = Enum.AutomaticSize.Y
+			card.BackgroundColor3 = CARD_BG
+			card.BorderSizePixel = 0
+			card.Parent = scroll
+			addCorner(card)
+			addStroke(card, CARD_STROKE)
+
+			local list = Instance.new("UIListLayout")
+			list.SortOrder = Enum.SortOrder.LayoutOrder
+			list.Parent = card
+			return card
+		end
+
+		-- header row: [dot] title ............ [key] [switch]
+		local function addHeader(card, f, title)
+			local row = Instance.new("Frame")
+			row.LayoutOrder = 1
+			row.BackgroundTransparency = 1
+			row.Size = UDim2.new(1, 0, 0, 40)
+			row.Parent = card
+
+			local labelX = 14
+			if f.hasKey then
+				local dot = Instance.new("Frame")
+				dot.AnchorPoint = Vector2.new(0, 0.5)
+				dot.Position = UDim2.new(0, 14, 0.5, 0)
+				dot.Size = UDim2.fromOffset(8, 8)
+				dot.BackgroundColor3 = DOT_OFF
+				dot.BorderSizePixel = 0
+				dot.Parent = row
+				addCorner(dot, 1000)
+				f.dot = dot
+				labelX = 30
+			end
+
+			local reserve = f.hasKey and 126 or 62
+			local label = Instance.new("TextLabel")
+			label.BackgroundTransparency = 1
+			label.Position = UDim2.fromOffset(labelX, 0)
+			label.Size = UDim2.new(1, -(labelX + reserve), 1, 0)
+			label.Font = Enum.Font.GothamMedium
+			label.Text = title
+			label.TextColor3 = TEXT_MAIN
+			label.TextSize = 13
+			label.TextXAlignment = Enum.TextXAlignment.Left
+			label.TextTruncate = Enum.TextTruncate.AtEnd
+			label.Parent = row
+
+			-- switch
+			local switch = Instance.new("TextButton")
+			switch.Name = "Switch"
+			switch.AnchorPoint = Vector2.new(1, 0.5)
+			switch.Position = UDim2.new(1, -10, 0.5, 0)
+			switch.Size = UDim2.fromOffset(42, 22)
+			switch.AutoButtonColor = false
+			switch.Text = ""
+			switch.BorderSizePixel = 0
+			switch.Parent = row
+			addCorner(switch, 7)
+			local switchStroke = addStroke(switch, Color3.fromRGB(60, 60, 66))
+
+			local knob = Instance.new("Frame")
+			knob.AnchorPoint = Vector2.new(0, 0.5)
+			knob.Size = UDim2.fromOffset(16, 16)
+			knob.BorderSizePixel = 0
+			knob.Parent = switch
+			addCorner(knob, 5)
+
+			local function applySwitch(animate)
+				local info = animate and fadeInfo or TweenInfo.new(0)
+				TweenService:Create(switch, info, {BackgroundColor3 = f.enabled and ON_TRACK or OFF_TRACK}):Play()
+				TweenService:Create(knob, info, {
+					BackgroundColor3 = f.enabled and ON_KNOB or OFF_KNOB,
+					Position = UDim2.new(0, f.enabled and 23 or 3, 0.5, 0),
+				}):Play()
+			end
+			applySwitch(false)
+
+			switch.MouseEnter:Connect(function()
+				TweenService:Create(switchStroke, fadeInfo, {Color = Color3.fromRGB(110, 110, 120)}):Play()
+			end)
+			switch.MouseLeave:Connect(function()
+				TweenService:Create(switchStroke, fadeInfo, {Color = Color3.fromRGB(60, 60, 66)}):Play()
+			end)
+			switch.MouseButton1Click:Connect(function()
+				f.enabled = not f.enabled
+				applySwitch(true)
+				refreshFeature(f)
+			end)
+
+			-- keybind button
+			if f.hasKey then
+				local keyBtn = Instance.new("TextButton")
+				keyBtn.Name = "Keybind"
+				keyBtn.AnchorPoint = Vector2.new(1, 0.5)
+				keyBtn.Position = UDim2.new(1, -60, 0.5, 0)
+				keyBtn.Size = UDim2.fromOffset(58, 22)
+				keyBtn.BackgroundColor3 = Color3.fromRGB(36, 36, 41)
+				keyBtn.BorderSizePixel = 0
+				keyBtn.AutoButtonColor = false
+				keyBtn.Font = Enum.Font.GothamMedium
+				keyBtn.TextColor3 = Color3.fromRGB(215, 215, 220)
+				keyBtn.TextSize = 11
+				keyBtn.TextTruncate = Enum.TextTruncate.AtEnd
+				keyBtn.Parent = row
+				addCorner(keyBtn, 6)
+				local keyStroke = addStroke(keyBtn, Color3.fromRGB(60, 60, 66))
+				f.keyBtn, f.keyStroke = keyBtn, keyStroke
+
+				function f.refreshKeyButton()
+					local waiting = listening == f
+					keyBtn.Text = waiting and "..." or keyText(f)
+					TweenService:Create(keyStroke, fadeInfo, {
+						Color = waiting and Color3.fromRGB(225, 225, 232) or Color3.fromRGB(60, 60, 66),
+					}):Play()
+				end
+				f.refreshKeyButton()
+
+				keyBtn.MouseButton1Click:Connect(function()
+					local previous = listening
+					listening = f
+					if previous and previous ~= f and previous.refreshKeyButton then
+						previous.refreshKeyButton()
+					end
+					f.refreshKeyButton()
+				end)
+			end
+		end
+
+		-- method selector (segmented buttons)
+		local function addMethods(card, order, options, default)
+			local row = Instance.new("Frame")
+			row.LayoutOrder = order
+			row.BackgroundTransparency = 1
+			row.Size = UDim2.new(1, 0, 0, 36)
+			row.Parent = card
+
+			local holder = Instance.new("Frame")
+			holder.BackgroundTransparency = 1
+			holder.Position = UDim2.fromOffset(14, 2)
+			holder.Size = UDim2.new(1, -28, 0, 26)
+			holder.Parent = row
+
+			local layout = Instance.new("UIListLayout")
+			layout.FillDirection = Enum.FillDirection.Horizontal
+			layout.Padding = UDim.new(0, 6)
+			layout.SortOrder = Enum.SortOrder.LayoutOrder
+			layout.Parent = holder
+
+			local selected = default
+			local buttons, strokes = {}, {}
+			local n = #options
+
+			local function refresh(animate)
+				local info = animate and fadeInfo or TweenInfo.new(0)
+				for name, btn in pairs(buttons) do
+					local sel = name == selected
+					TweenService:Create(btn, info, {
+						BackgroundColor3 = sel and SEL_BG or CARD_BG,
+						TextColor3 = sel and TEXT_MAIN or TEXT_SOFT,
+					}):Play()
+					TweenService:Create(strokes[name], info, {Color = sel and SEL_STROKE or FIELD_STROKE}):Play()
+				end
+			end
+
+			for i, name in ipairs(options) do
+				local btn = Instance.new("TextButton")
+				btn.Name = name
+				btn.LayoutOrder = i
+				btn.Size = UDim2.new(1 / n, -6 * (n - 1) / n, 1, 0)
+				btn.BackgroundColor3 = CARD_BG
+				btn.BorderSizePixel = 0
+				btn.AutoButtonColor = false
+				btn.Font = Enum.Font.GothamMedium
+				btn.Text = name
+				btn.TextColor3 = TEXT_SOFT
+				btn.TextSize = 12
+				btn.Parent = holder
+				addCorner(btn)
+				strokes[name] = addStroke(btn, FIELD_STROKE)
+				buttons[name] = btn
+
+				btn.MouseButton1Click:Connect(function()
+					selected = name
+					refresh(true)
+				end)
+			end
+			refresh(false)
+
+			return {
+				Get = function()
+					return selected
+				end,
+			}
+		end
+
+		-- slider with a value read-out
+		local function addSlider(card, order, title, min, max, default, onChange)
+			local row = Instance.new("Frame")
+			row.LayoutOrder = order
+			row.BackgroundTransparency = 1
+			row.Size = UDim2.new(1, 0, 0, 46)
+			row.Parent = card
+
+			local titleLabel = Instance.new("TextLabel")
+			titleLabel.BackgroundTransparency = 1
+			titleLabel.Position = UDim2.fromOffset(14, 4)
+			titleLabel.Size = UDim2.new(0.5, -14, 0, 16)
+			titleLabel.Font = Enum.Font.GothamMedium
+			titleLabel.Text = title
+			titleLabel.TextColor3 = TEXT_SOFT
+			titleLabel.TextSize = 12
+			titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+			titleLabel.Parent = row
+
+			local valueLabel = Instance.new("TextLabel")
+			valueLabel.BackgroundTransparency = 1
+			valueLabel.AnchorPoint = Vector2.new(1, 0)
+			valueLabel.Position = UDim2.new(1, -14, 0, 4)
+			valueLabel.Size = UDim2.new(0.5, -14, 0, 16)
+			valueLabel.Font = Enum.Font.GothamMedium
+			valueLabel.TextColor3 = TEXT_MAIN
+			valueLabel.TextSize = 12
+			valueLabel.TextXAlignment = Enum.TextXAlignment.Right
+			valueLabel.Parent = row
+
+			local track = Instance.new("Frame")
+			track.Position = UDim2.fromOffset(14, 28)
+			track.Size = UDim2.new(1, -28, 0, 6)
+			track.BackgroundColor3 = OFF_TRACK
+			track.BorderSizePixel = 0
+			track.Parent = row
+			addCorner(track, 1000)
+
+			local fill = Instance.new("Frame")
+			fill.Size = UDim2.fromScale(0, 1)
+			fill.BackgroundColor3 = ON_TRACK
+			fill.BorderSizePixel = 0
+			fill.Parent = track
+			addCorner(fill, 1000)
+
+			local thumb = Instance.new("Frame")
+			thumb.AnchorPoint = Vector2.new(0.5, 0.5)
+			thumb.Size = UDim2.fromOffset(12, 12)
+			thumb.BackgroundColor3 = Color3.fromRGB(245, 245, 248)
+			thumb.BorderSizePixel = 0
+			thumb.ZIndex = 3
+			thumb.Parent = track
+			addCorner(thumb, 1000)
+
+			local hit = Instance.new("TextButton")
+			hit.Position = UDim2.fromOffset(14, 20)
+			hit.Size = UDim2.new(1, -28, 0, 22)
+			hit.BackgroundTransparency = 1
+			hit.AutoButtonColor = false
+			hit.Text = ""
+			hit.ZIndex = 5
+			hit.Parent = row
+
+			local value = default
+			local function setValue(v, fire)
+				v = math.clamp(math.floor(v + 0.5), min, max)
+				value = v
+				local pct = (v - min) / (max - min)
+				fill.Size = UDim2.fromScale(pct, 1)
+				thumb.Position = UDim2.fromScale(pct, 0.5)
+				valueLabel.Text = tostring(v)
+				if fire then
+					onChange(v)
+				end
+			end
+			setValue(default, false)
+
+			hit.InputBegan:Connect(function(input)
+				if isPress(input) then
+					dragFn = function()
+						local m = UserInputService:GetMouseLocation()
+						local ap, as = track.AbsolutePosition, track.AbsoluteSize
+						setValue(min + math.clamp((m.X - ap.X) / as.X, 0, 1) * (max - min), true)
+					end
+					dragFn()
+				end
+			end)
+
+			return {
+				Get = function()
+					return value
+				end,
+			}
+		end
+
+		-- ====================================================
+		-- helpers for the effects
+		-- ====================================================
+		local function getChar()
+			local char = LocalPlayer.Character
+			if not char then
+				return nil
+			end
+			local hum = char:FindFirstChildOfClass("Humanoid")
+			local root = char:FindFirstChild("HumanoidRootPart")
+			return char, hum, root
+		end
+
+		-- no-clip
+		local noclipParts = {}
+		local function restoreCollisions()
+			for part in pairs(noclipParts) do
+				if part.Parent then
+					part.CanCollide = true
+				end
+			end
+			table.clear(noclipParts)
+		end
+
+		-- slippery friction (speed method)
+		local SLIPPERY = PhysicalProperties.new(0.7, 0, 0, 100, 100)
+		local origPhysics = {}
+		local slipApplied = false
+		local function applyFriction(char)
+			table.clear(origPhysics)
+			for _, part in ipairs(char:GetDescendants()) do
+				if part:IsA("BasePart") then
+					origPhysics[part] = part.CustomPhysicalProperties or false
+					part.CustomPhysicalProperties = SLIPPERY
+				end
+			end
+			slipApplied = true
+		end
+		local function restoreFriction()
+			for part, orig in pairs(origPhysics) do
+				if part.Parent then
+					part.CustomPhysicalProperties = orig or nil
+				end
+			end
+			table.clear(origPhysics)
+			slipApplied = false
+		end
+
+		-- ====================================================
+		-- features
+		-- ====================================================
+		local noclip = {enabled = false, active = false, hasKey = true}
+		local infJump = {enabled = false, active = false, hasKey = false}
+		local speed = {enabled = false, active = false, hasKey = true}
+		local flight = {enabled = false, active = false, hasKey = true}
+		local jump = {enabled = false, active = false, hasKey = false}
+		local gravity = {enabled = false, active = false, hasKey = false}
+		local keyed = {noclip, speed, flight}
+
+		local speedMethod, speedSlider
+		local flightMethod, flightSlider
+		local jumpSlider, gravitySlider
+
+		-- No-Clip
+		do
+			local card = newCard(1)
+			addHeader(card, noclip, "No-Clip")
+			noclip.onChange = function(active)
+				if not active then
+					restoreCollisions()
+				end
+			end
+		end
+
+		-- Inf Jump
+		do
+			local card = newCard(2)
+			addHeader(card, infJump, "Inf Jump")
+		end
+
+		-- Speed
+		do
+			local card = newCard(3)
+			addHeader(card, speed, "Speed")
+			speedMethod = addMethods(card, 2, {"Position", "Velocity", "Slippery"}, "Velocity")
+			speedSlider = addSlider(card, 3, "Amount", 16, 300, 50, function() end)
+			speed.onChange = function(active)
+				if not active and slipApplied then
+					restoreFriction()
+				end
+			end
+		end
+
+		-- Flight
+		do
+			local card = newCard(4)
+			addHeader(card, flight, "Flight")
+			flightMethod = addMethods(card, 2, {"Velocity", "Position"}, "Velocity")
+			flightSlider = addSlider(card, 3, "Amount", 10, 300, 60, function() end)
+			flight.onChange = function(active)
+				if not active then
+					local _, _, root = getChar()
+					if root then
+						root.AssemblyLinearVelocity = Vector3.zero
+					end
+				end
+			end
+		end
+
+		-- Jump (jump power)
+		local origUseJumpPower, origJumpPower
+		do
+			local card = newCard(5)
+			addHeader(card, jump, "Jump")
+			jumpSlider = addSlider(card, 2, "Jump power", 50, 400, 100, function() end)
+			jump.onChange = function(active)
+				local _, hum = getChar()
+				if active then
+					if hum then
+						origUseJumpPower, origJumpPower = hum.UseJumpPower, hum.JumpPower
+					end
+				elseif hum and origJumpPower ~= nil then
+					hum.UseJumpPower = origUseJumpPower
+					hum.JumpPower = origJumpPower
+				end
+			end
+		end
+
+		-- Gravity
+		local origGravity
+		do
+			local card = newCard(6)
+			addHeader(card, gravity, "Gravity")
+			gravitySlider = addSlider(card, 2, "Gravity", 0, 400, 100, function() end)
+			gravity.onChange = function(active)
+				if active then
+					origGravity = workspace.Gravity
+				elseif origGravity ~= nil then
+					workspace.Gravity = origGravity
+				end
+			end
+		end
+
+		-- Inf Jump effect hook
+		infJump.onChange = function() end
+		local jumpConn = UserInputService.JumpRequest:Connect(function()
+			if infJump.active then
+				local _, hum = getChar()
+				if hum then
+					hum:ChangeState(Enum.HumanoidStateType.Jumping)
+				end
+			end
+		end)
+
+		-- ====================================================
+		-- keybinds
+		-- ====================================================
+		local inputConn = UserInputService.InputBegan:Connect(function(input, processed)
+			if input.UserInputType ~= Enum.UserInputType.Keyboard then
+				return
+			end
+			local kc = input.KeyCode
+
+			if listening then
+				local f = listening
+				listening = nil
+				if kc ~= Enum.KeyCode.Escape then
+					local hadKey = f.key ~= nil
+					f.key = (kc ~= Enum.KeyCode.Backspace and kc ~= Enum.KeyCode.Delete) and kc or nil
+					if hadKey ~= (f.key ~= nil) then
+						refreshFeature(f)
+					end
+				end
+				f.refreshKeyButton()
+				return
+			end
+
+			if processed then
+				return
+			end
+			for _, f in ipairs(keyed) do
+				if f.enabled and f.key and f.key == kc then
+					setActive(f, not f.active)
+				end
+			end
+		end)
+
+		local moveConn = UserInputService.InputChanged:Connect(function(input)
+			if dragFn and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+				dragFn()
+			end
+		end)
+		local endConn = UserInputService.InputEnded:Connect(function(input)
+			if isPress(input) then
+				dragFn = nil
+			end
+		end)
+
+		-- ====================================================
+		-- effect loops
+		-- ====================================================
+		local steppedConn = RunService.Stepped:Connect(function()
+			if not noclip.active then
+				return
+			end
+			local char = LocalPlayer.Character
+			if not char then
+				return
+			end
+			for _, part in ipairs(char:GetDescendants()) do
+				if part:IsA("BasePart") and part.CanCollide then
+					noclipParts[part] = true
+					part.CanCollide = false
+				end
+			end
+		end)
+
+		local function doSpeed(hum, root, dt)
+			local dir = hum.MoveDirection
+			if dir.Magnitude < 0.01 then
+				return
+			end
+			dir = dir.Unit
+			local method = speedMethod.Get()
+			local amount = speedSlider.Get()
+			if method == "Position" then
+				local extra = math.max(amount - hum.WalkSpeed, 0)
+				root.CFrame = root.CFrame + dir * extra * dt
+			elseif method == "Velocity" then
+				local vel = root.AssemblyLinearVelocity
+				root.AssemblyLinearVelocity = Vector3.new(dir.X * amount, vel.Y, dir.Z * amount)
+			else -- Slippery: zero friction + momentum build-up
+				local vel = root.AssemblyLinearVelocity
+				local target = Vector3.new(dir.X * amount, vel.Y, dir.Z * amount)
+				root.AssemblyLinearVelocity = vel:Lerp(target, math.clamp(dt * 10, 0, 1))
+			end
+		end
+
+		local function doFlight(root, dt)
+			local cam = workspace.CurrentCamera
+			local dir = Vector3.zero
+			if cam and UserInputService:GetFocusedTextBox() == nil then
+				local look, right = cam.CFrame.LookVector, cam.CFrame.RightVector
+				if UserInputService:IsKeyDown(Enum.KeyCode.W) then dir += look end
+				if UserInputService:IsKeyDown(Enum.KeyCode.S) then dir -= look end
+				if UserInputService:IsKeyDown(Enum.KeyCode.D) then dir += right end
+				if UserInputService:IsKeyDown(Enum.KeyCode.A) then dir -= right end
+				if UserInputService:IsKeyDown(Enum.KeyCode.Space) then dir += Vector3.yAxis end
+				if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then dir -= Vector3.yAxis end
+			end
+			if dir.Magnitude > 0 then
+				dir = dir.Unit
+			end
+			local amount = flightSlider.Get()
+			if flightMethod.Get() == "Velocity" then
+				root.AssemblyLinearVelocity = dir * amount
+			else
+				root.AssemblyLinearVelocity = Vector3.zero
+				root.CFrame = root.CFrame + dir * amount * dt
+			end
+		end
+
+		local heartbeatConn = RunService.Heartbeat:Connect(function(dt)
+			if gravity.active then
+				workspace.Gravity = gravitySlider.Get()
+			end
+
+			local char, hum, root = getChar()
+			if jump.active and hum then
+				hum.UseJumpPower = true
+				hum.JumpPower = jumpSlider.Get()
+			end
+			if not (char and hum and root) or hum.Health <= 0 then
+				return
+			end
+
+			local wantSlip = speed.active and not flight.active and speedMethod.Get() == "Slippery"
+			if wantSlip and not slipApplied then
+				applyFriction(char)
+			elseif not wantSlip and slipApplied then
+				restoreFriction()
+			end
+
+			if flight.active then
+				doFlight(root, dt)
+			elseif speed.active then
+				doSpeed(hum, root, dt)
+			end
+		end)
+
+		-- a respawn replaces every part, so drop the old bookkeeping
+		local charConn = LocalPlayer.CharacterAdded:Connect(function()
+			restoreFriction()
+			table.clear(noclipParts)
+		end)
+
+		-- ====================================================
+		-- cleanup
+		-- ====================================================
+		local function destroy()
+			for _, f in ipairs({noclip, infJump, speed, flight, jump, gravity}) do
+				setActive(f, false)
+			end
+			restoreFriction()
+			restoreCollisions()
+			jumpConn:Disconnect()
+			inputConn:Disconnect()
+			moveConn:Disconnect()
+			endConn:Disconnect()
+			steppedConn:Disconnect()
+			heartbeatConn:Disconnect()
+			charConn:Disconnect()
+		end
+		win.onClose(destroy)
+
+		return {
+			Destroy = destroy,
+		}
+	end
+end
