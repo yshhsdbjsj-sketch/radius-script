@@ -16,8 +16,8 @@
 --     Skeleton Esp    color + alpha, thickness
 --
 -- behaviour:
---   * the settings window under the menu shows the feature you selected
---     (turning a feature on selects it, "Settings" toggles it)
+--   * turning a feature on opens its settings window under the menu
+--     (turning it off closes it)
 --   * while the menu is OPEN the features only show on the 3D avatar preview
 --   * when the menu is HIDDEN (menu toggle key) they draw on every player that passes the checks
 --   * the preview and the real ESP always use the same colors and styles
@@ -607,58 +607,6 @@ return function(lib)
 			return obj
 		end
 
-		-- small "Settings" button that sits left of a feature switch
-		local function makeSettingsButton(parent, onClick)
-			local btn = Instance.new("TextButton")
-			btn.AnchorPoint = Vector2.new(1, 0.5)
-			btn.Position = UDim2.new(1, -70, 0.5, 0)
-			btn.Size = UDim2.fromOffset(62, 24)
-			btn.BackgroundColor3 = Color3.fromRGB(36, 36, 41)
-			btn.BorderSizePixel = 0
-			btn.AutoButtonColor = false
-			btn.Font = Enum.Font.GothamMedium
-			btn.Text = "Settings"
-			btn.TextColor3 = TEXT_SOFT
-			btn.TextSize = 12
-			btn.Parent = parent
-			addCorner(btn, 6)
-			local stroke = addStroke(btn, FIELD_STROKE)
-
-			local locked, active = false, false
-			local function strokeColor()
-				return active and Color3.fromRGB(120, 120, 130) or FIELD_STROKE
-			end
-
-			btn.MouseEnter:Connect(function()
-				if not locked and not active then
-					TweenService:Create(stroke, fadeInfo, {Color = Color3.fromRGB(90, 90, 100)}):Play()
-				end
-			end)
-			btn.MouseLeave:Connect(function()
-				TweenService:Create(stroke, fadeInfo, {Color = strokeColor()}):Play()
-			end)
-			btn.MouseButton1Click:Connect(function()
-				if not master then
-					return
-				end
-				onClick()
-			end)
-
-			local obj = {}
-			function obj.SetActive(value)
-				active = value
-				TweenService:Create(stroke, fadeInfo, {Color = strokeColor()}):Play()
-				TweenService:Create(btn, fadeInfo, {TextColor3 = value and TEXT_MAIN or TEXT_SOFT}):Play()
-			end
-			function obj.SetLocked(value)
-				locked = value
-				local t = value and LOCKED_T or 0
-				TweenService:Create(btn, fadeInfo, {BackgroundTransparency = t, TextTransparency = t}):Play()
-				TweenService:Create(stroke, fadeInfo, {Transparency = t}):Play()
-			end
-			return obj
-		end
-
 		-- card 1 rows
 		local masterRow = addRow(0, ROW_H)
 		addRowLabel(masterRow, "Enabled")
@@ -686,7 +634,7 @@ return function(lib)
 		end, true)
 
 		-- card 2 rows: one per feature (switch + settings button)
-		local featSwitch, featBtn = {}, {}
+		local featSwitch = {}
 		for i, key in ipairs(FEATURES) do
 			local row = addRow((i - 1) * 45, ROW_H, featCard)
 			addRowLabel(row, LABELS[key])
@@ -698,9 +646,6 @@ return function(lib)
 					selected = nil
 				end
 			end, true)
-			featBtn[key] = makeSettingsButton(row, function()
-				selected = (selected == key) and nil or key
-			end)
 			if i < #FEATURES then
 				addSeparator(i * 45 - 1, featCard)
 			end
@@ -780,7 +725,6 @@ return function(lib)
 			visSwitch.SetLocked(locked)
 			for _, key in ipairs(FEATURES) do
 				featSwitch[key].SetLocked(locked)
-				featBtn[key].SetLocked(locked)
 			end
 			local t = locked and LOCKED_T or 0
 			TweenService:Create(distTrack, fadeInfo, {BackgroundTransparency = t}):Play()
@@ -1248,7 +1192,6 @@ return function(lib)
 		local settingsShown = false
 		local shownKey = nil
 		local curH = 150
-		local lastSelected = nil
 
 		local function updateSettings()
 			local wanted = master and selected ~= nil and page.Visible
@@ -1276,13 +1219,6 @@ return function(lib)
 						end
 					end)
 					out:Play()
-				end
-			end
-
-			if selected ~= lastSelected then
-				lastSelected = selected
-				for _, key in ipairs(FEATURES) do
-					featBtn[key].SetActive(key == selected)
 				end
 			end
 
