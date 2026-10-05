@@ -3,16 +3,17 @@
 --   local buildMovementTab = loadstring(game:HttpGet(MOVEMENT_URL))()(lib)
 --   buildMovementTab({pages = pages, fadeInfo = fadeInfo, slideInfo = slideInfo})
 --
--- Movement page (scrollable):
+-- Movement page (scrollable). Every feature's settings stay hidden until its switch is
+-- on, then they slide open (and slide shut again when it's turned off):
 --   No-Clip   switch + keybind
---   Inf Jump  switch
---   Speed     switch + keybind + method (Position / Velocity / Slippery) + slider
---   Flight    switch + keybind + method (Velocity / Position) + slider
---   Jump      switch + slider (jump power)
---   Gravity   switch + slider
+--   Inf Jump  switch   -> power + cooldown   (infinite double jump: press jump in the air)
+--   Speed     switch + keybind -> method (Velocity / Slippery) + amount
+--   Flight    switch + keybind -> method (Velocity / Position) + amount
+--   Jump      switch   -> jump power         (higher ground jumps)
+--   Gravity   switch   -> gravity            (client-side workspace gravity)
 --
 -- keybind rule: switch ON + a key set  -> the key toggles the feature (switch only arms it)
---               switch ON + no key set -> the switch itself toggles the feature
+--               switch ON + no key set -> the switch itself toggles it
 --               switch OFF             -> the key does nothing
 -- Flight controls: W A S D move along the camera, Space = up, Left Ctrl = down
 
@@ -35,10 +36,10 @@ return function(lib)
 	local OFF_TRACK = Color3.fromRGB(44, 44, 50)
 	local ON_KNOB = Color3.fromRGB(22, 22, 25)
 	local OFF_KNOB = Color3.fromRGB(140, 140, 146)
-	local DOT_ON = Color3.fromRGB(225, 225, 232)
-	local DOT_OFF = Color3.fromRGB(60, 60, 66)
 	local SEL_BG = Color3.fromRGB(48, 48, 55)
 	local SEL_STROKE = Color3.fromRGB(120, 120, 130)
+
+	local METHODS_H, SLIDER_H = 36, 46
 
 	local SHORT_KEYS = {
 		LeftControl = "LCtrl", RightControl = "RCtrl",
@@ -96,9 +97,6 @@ return function(lib)
 				return
 			end
 			f.active = value
-			if f.dot then
-				TweenService:Create(f.dot, fadeInfo, {BackgroundColor3 = value and DOT_ON or DOT_OFF}):Play()
-			end
 			if f.onChange then
 				f.onChange(value)
 			end
@@ -141,7 +139,64 @@ return function(lib)
 			return card
 		end
 
-		-- header row: [dot] title ............ [key] [switch]
+		-- collapsible settings area: starts shut, slides + fades open when its switch is on
+		local function newOptions(card, order)
+			local group = Instance.new("CanvasGroup")
+			group.Name = "Options"
+			group.LayoutOrder = order
+			group.BackgroundTransparency = 1
+			group.BorderSizePixel = 0
+			group.Size = UDim2.new(1, 0, 0, 0)
+			group.GroupTransparency = 1
+			group.Visible = false
+			group.Parent = card
+
+			local list = Instance.new("UIListLayout")
+			list.SortOrder = Enum.SortOrder.LayoutOrder
+			list.Parent = group
+
+			-- thin divider under the header
+			local divRow = Instance.new("Frame")
+			divRow.LayoutOrder = 0
+			divRow.BackgroundTransparency = 1
+			divRow.Size = UDim2.new(1, 0, 0, 1)
+			divRow.Parent = group
+			local divLine = Instance.new("Frame")
+			divLine.Position = UDim2.fromOffset(14, 0)
+			divLine.Size = UDim2.new(1, -28, 1, 0)
+			divLine.BackgroundColor3 = Color3.fromRGB(38, 38, 42)
+			divLine.BorderSizePixel = 0
+			divLine.Parent = divRow
+
+			local opts = {group = group, height = 1, open = false}
+
+			function opts.setOpen(open, animate)
+				opts.open = open
+				local info = TweenInfo.new(animate and 0.32 or 0, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+				if open then
+					group.Visible = true
+					TweenService:Create(group, info, {
+						Size = UDim2.new(1, 0, 0, opts.height),
+						GroupTransparency = 0,
+					}):Play()
+				else
+					local tween = TweenService:Create(group, info, {
+						Size = UDim2.new(1, 0, 0, 0),
+						GroupTransparency = 1,
+					})
+					tween.Completed:Connect(function()
+						if not opts.open then
+							group.Visible = false
+						end
+					end)
+					tween:Play()
+				end
+			end
+
+			return opts
+		end
+
+		-- header row: title ............ [key] [switch]
 		local function addHeader(card, f, title)
 			local row = Instance.new("Frame")
 			row.LayoutOrder = 1
@@ -149,25 +204,11 @@ return function(lib)
 			row.Size = UDim2.new(1, 0, 0, 40)
 			row.Parent = card
 
-			local labelX = 14
-			if f.hasKey then
-				local dot = Instance.new("Frame")
-				dot.AnchorPoint = Vector2.new(0, 0.5)
-				dot.Position = UDim2.new(0, 14, 0.5, 0)
-				dot.Size = UDim2.fromOffset(8, 8)
-				dot.BackgroundColor3 = DOT_OFF
-				dot.BorderSizePixel = 0
-				dot.Parent = row
-				addCorner(dot, 1000)
-				f.dot = dot
-				labelX = 30
-			end
-
 			local reserve = f.hasKey and 126 or 62
 			local label = Instance.new("TextLabel")
 			label.BackgroundTransparency = 1
-			label.Position = UDim2.fromOffset(labelX, 0)
-			label.Size = UDim2.new(1, -(labelX + reserve), 1, 0)
+			label.Position = UDim2.fromOffset(14, 0)
+			label.Size = UDim2.new(1, -(14 + reserve), 1, 0)
 			label.Font = Enum.Font.GothamMedium
 			label.Text = title
 			label.TextColor3 = TEXT_MAIN
@@ -216,6 +257,9 @@ return function(lib)
 				f.enabled = not f.enabled
 				applySwitch(true)
 				refreshFeature(f)
+				if f.options then
+					f.options.setOpen(f.enabled, true)
+				end
 			end)
 
 			-- keybind button
@@ -235,7 +279,6 @@ return function(lib)
 				keyBtn.Parent = row
 				addCorner(keyBtn, 6)
 				local keyStroke = addStroke(keyBtn, Color3.fromRGB(60, 60, 66))
-				f.keyBtn, f.keyStroke = keyBtn, keyStroke
 
 				function f.refreshKeyButton()
 					local waiting = listening == f
@@ -258,16 +301,16 @@ return function(lib)
 		end
 
 		-- method selector (segmented buttons)
-		local function addMethods(card, order, options, default)
+		local function addMethods(parent, order, options, default)
 			local row = Instance.new("Frame")
 			row.LayoutOrder = order
 			row.BackgroundTransparency = 1
-			row.Size = UDim2.new(1, 0, 0, 36)
-			row.Parent = card
+			row.Size = UDim2.new(1, 0, 0, METHODS_H)
+			row.Parent = parent
 
 			local holder = Instance.new("Frame")
 			holder.BackgroundTransparency = 1
-			holder.Position = UDim2.fromOffset(14, 2)
+			holder.Position = UDim2.fromOffset(14, 5)
 			holder.Size = UDim2.new(1, -28, 0, 26)
 			holder.Parent = row
 
@@ -325,16 +368,16 @@ return function(lib)
 		end
 
 		-- slider with a value read-out
-		local function addSlider(card, order, title, min, max, default, onChange)
+		local function addSlider(parent, order, title, min, max, default, suffix)
 			local row = Instance.new("Frame")
 			row.LayoutOrder = order
 			row.BackgroundTransparency = 1
-			row.Size = UDim2.new(1, 0, 0, 46)
-			row.Parent = card
+			row.Size = UDim2.new(1, 0, 0, SLIDER_H)
+			row.Parent = parent
 
 			local titleLabel = Instance.new("TextLabel")
 			titleLabel.BackgroundTransparency = 1
-			titleLabel.Position = UDim2.fromOffset(14, 4)
+			titleLabel.Position = UDim2.fromOffset(14, 6)
 			titleLabel.Size = UDim2.new(0.5, -14, 0, 16)
 			titleLabel.Font = Enum.Font.GothamMedium
 			titleLabel.Text = title
@@ -346,7 +389,7 @@ return function(lib)
 			local valueLabel = Instance.new("TextLabel")
 			valueLabel.BackgroundTransparency = 1
 			valueLabel.AnchorPoint = Vector2.new(1, 0)
-			valueLabel.Position = UDim2.new(1, -14, 0, 4)
+			valueLabel.Position = UDim2.new(1, -14, 0, 6)
 			valueLabel.Size = UDim2.new(0.5, -14, 0, 16)
 			valueLabel.Font = Enum.Font.GothamMedium
 			valueLabel.TextColor3 = TEXT_MAIN
@@ -355,7 +398,7 @@ return function(lib)
 			valueLabel.Parent = row
 
 			local track = Instance.new("Frame")
-			track.Position = UDim2.fromOffset(14, 28)
+			track.Position = UDim2.fromOffset(14, 30)
 			track.Size = UDim2.new(1, -28, 0, 6)
 			track.BackgroundColor3 = OFF_TRACK
 			track.BorderSizePixel = 0
@@ -379,7 +422,7 @@ return function(lib)
 			addCorner(thumb, 1000)
 
 			local hit = Instance.new("TextButton")
-			hit.Position = UDim2.fromOffset(14, 20)
+			hit.Position = UDim2.fromOffset(14, 22)
 			hit.Size = UDim2.new(1, -28, 0, 22)
 			hit.BackgroundTransparency = 1
 			hit.AutoButtonColor = false
@@ -388,25 +431,22 @@ return function(lib)
 			hit.Parent = row
 
 			local value = default
-			local function setValue(v, fire)
+			local function setValue(v)
 				v = math.clamp(math.floor(v + 0.5), min, max)
 				value = v
 				local pct = (v - min) / (max - min)
 				fill.Size = UDim2.fromScale(pct, 1)
 				thumb.Position = UDim2.fromScale(pct, 0.5)
-				valueLabel.Text = tostring(v)
-				if fire then
-					onChange(v)
-				end
+				valueLabel.Text = tostring(v) .. (suffix or "")
 			end
-			setValue(default, false)
+			setValue(default)
 
 			hit.InputBegan:Connect(function(input)
 				if isPress(input) then
 					dragFn = function()
 						local m = UserInputService:GetMouseLocation()
 						local ap, as = track.AbsolutePosition, track.AbsoluteSize
-						setValue(min + math.clamp((m.X - ap.X) / as.X, 0, 1) * (max - min), true)
+						setValue(min + math.clamp((m.X - ap.X) / as.X, 0, 1) * (max - min))
 					end
 					dragFn()
 				end
@@ -427,9 +467,7 @@ return function(lib)
 			if not char then
 				return nil
 			end
-			local hum = char:FindFirstChildOfClass("Humanoid")
-			local root = char:FindFirstChild("HumanoidRootPart")
-			return char, hum, root
+			return char, char:FindFirstChildOfClass("Humanoid"), char:FindFirstChild("HumanoidRootPart")
 		end
 
 		-- no-clip
@@ -480,6 +518,7 @@ return function(lib)
 
 		local speedMethod, speedSlider
 		local flightMethod, flightSlider
+		local infPower, infCooldown
 		local jumpSlider, gravitySlider
 
 		-- No-Clip
@@ -493,18 +532,26 @@ return function(lib)
 			end
 		end
 
-		-- Inf Jump
+		-- Inf Jump (infinite double jump)
 		do
 			local card = newCard(2)
+			local opts = newOptions(card, 2)
+			infJump.options = opts
 			addHeader(card, infJump, "Inf Jump")
+			infPower = addSlider(opts.group, 1, "Air jump power", 30, 250, 70)
+			infCooldown = addSlider(opts.group, 2, "Cooldown", 0, 500, 150, " ms")
+			opts.height += SLIDER_H * 2
 		end
 
 		-- Speed
 		do
 			local card = newCard(3)
+			local opts = newOptions(card, 2)
+			speed.options = opts
 			addHeader(card, speed, "Speed")
-			speedMethod = addMethods(card, 2, {"Position", "Velocity", "Slippery"}, "Velocity")
-			speedSlider = addSlider(card, 3, "Amount", 16, 300, 50, function() end)
+			speedMethod = addMethods(opts.group, 1, {"Velocity", "Slippery"}, "Velocity")
+			speedSlider = addSlider(opts.group, 2, "Amount", 16, 300, 50)
+			opts.height += METHODS_H + SLIDER_H
 			speed.onChange = function(active)
 				if not active and slipApplied then
 					restoreFriction()
@@ -515,9 +562,12 @@ return function(lib)
 		-- Flight
 		do
 			local card = newCard(4)
+			local opts = newOptions(card, 2)
+			flight.options = opts
 			addHeader(card, flight, "Flight")
-			flightMethod = addMethods(card, 2, {"Velocity", "Position"}, "Velocity")
-			flightSlider = addSlider(card, 3, "Amount", 10, 300, 60, function() end)
+			flightMethod = addMethods(opts.group, 1, {"Velocity", "Position"}, "Velocity")
+			flightSlider = addSlider(opts.group, 2, "Amount", 10, 300, 60)
+			opts.height += METHODS_H + SLIDER_H
 			flight.onChange = function(active)
 				if not active then
 					local _, _, root = getChar()
@@ -528,12 +578,15 @@ return function(lib)
 			end
 		end
 
-		-- Jump (jump power)
+		-- Jump (higher ground jumps)
 		local origUseJumpPower, origJumpPower
 		do
 			local card = newCard(5)
+			local opts = newOptions(card, 2)
+			jump.options = opts
 			addHeader(card, jump, "Jump")
-			jumpSlider = addSlider(card, 2, "Jump power", 50, 400, 100, function() end)
+			jumpSlider = addSlider(opts.group, 1, "Jump power", 50, 400, 100)
+			opts.height += SLIDER_H
 			jump.onChange = function(active)
 				local _, hum = getChar()
 				if active then
@@ -547,12 +600,15 @@ return function(lib)
 			end
 		end
 
-		-- Gravity
+		-- Gravity (client-side)
 		local origGravity
 		do
 			local card = newCard(6)
+			local opts = newOptions(card, 2)
+			gravity.options = opts
 			addHeader(card, gravity, "Gravity")
-			gravitySlider = addSlider(card, 2, "Gravity", 0, 400, 100, function() end)
+			gravitySlider = addSlider(opts.group, 1, "Gravity", 0, 400, 100)
+			opts.height += SLIDER_H
 			gravity.onChange = function(active)
 				if active then
 					origGravity = workspace.Gravity
@@ -561,17 +617,6 @@ return function(lib)
 				end
 			end
 		end
-
-		-- Inf Jump effect hook
-		infJump.onChange = function() end
-		local jumpConn = UserInputService.JumpRequest:Connect(function()
-			if infJump.active then
-				local _, hum = getChar()
-				if hum then
-					hum:ChangeState(Enum.HumanoidStateType.Jumping)
-				end
-			end
-		end)
 
 		-- ====================================================
 		-- keybinds
@@ -618,9 +663,62 @@ return function(lib)
 		end)
 
 		-- ====================================================
+		-- Inf Jump: press jump in the air -> jump again (no limit)
+		-- ====================================================
+		local jumpBoosted = false -- true from a jump until you touch the ground again
+		local lastAirJump = 0
+
+		local jumpConn = UserInputService.JumpRequest:Connect(function()
+			if not infJump.active then
+				return
+			end
+			local _, hum, root = getChar()
+			if not (hum and root) or hum.Health <= 0 then
+				return
+			end
+			-- on the ground the normal jump handles it
+			if hum.FloorMaterial ~= Enum.Material.Air then
+				return
+			end
+			local now = os.clock()
+			if now - lastAirJump < infCooldown.Get() / 1000 then
+				return
+			end
+			lastAirJump = now
+
+			local power = infPower.Get()
+			jumpBoosted = true -- keep the Jump feature from overriding this jump
+			pcall(function()
+				hum:ChangeState(Enum.HumanoidStateType.Jumping)
+			end)
+			local vel = root.AssemblyLinearVelocity
+			root.AssemblyLinearVelocity = Vector3.new(vel.X, power, vel.Z)
+			task.defer(function()
+				if root.Parent then
+					local v = root.AssemblyLinearVelocity
+					root.AssemblyLinearVelocity = Vector3.new(v.X, math.max(v.Y, power), v.Z)
+				end
+			end)
+		end)
+
+		-- ====================================================
 		-- effect loops
 		-- ====================================================
+		-- Gravity: workspace.Gravity is client-side. It is pushed right before physics
+		-- (Stepped), every frame, and instantly if the game tries to change it back.
+		local function pushGravity()
+			if gravity.active then
+				local target = gravitySlider.Get()
+				if workspace.Gravity ~= target then
+					workspace.Gravity = target
+				end
+			end
+		end
+		local gravitySignal = workspace:GetPropertyChangedSignal("Gravity"):Connect(pushGravity)
+		local renderConn = RunService.RenderStepped:Connect(pushGravity)
+
 		local steppedConn = RunService.Stepped:Connect(function()
+			pushGravity()
 			if not noclip.active then
 				return
 			end
@@ -642,17 +740,12 @@ return function(lib)
 				return
 			end
 			dir = dir.Unit
-			local method = speedMethod.Get()
 			local amount = speedSlider.Get()
-			if method == "Position" then
-				local extra = math.max(amount - hum.WalkSpeed, 0)
-				root.CFrame = root.CFrame + dir * extra * dt
-			elseif method == "Velocity" then
-				local vel = root.AssemblyLinearVelocity
-				root.AssemblyLinearVelocity = Vector3.new(dir.X * amount, vel.Y, dir.Z * amount)
+			local vel = root.AssemblyLinearVelocity
+			local target = Vector3.new(dir.X * amount, vel.Y, dir.Z * amount)
+			if speedMethod.Get() == "Velocity" then
+				root.AssemblyLinearVelocity = target
 			else -- Slippery: zero friction + momentum build-up
-				local vel = root.AssemblyLinearVelocity
-				local target = Vector3.new(dir.X * amount, vel.Y, dir.Z * amount)
 				root.AssemblyLinearVelocity = vel:Lerp(target, math.clamp(dt * 10, 0, 1))
 			end
 		end
@@ -682,17 +775,30 @@ return function(lib)
 		end
 
 		local heartbeatConn = RunService.Heartbeat:Connect(function(dt)
-			if gravity.active then
-				workspace.Gravity = gravitySlider.Get()
-			end
+			pushGravity()
 
 			local char, hum, root = getChar()
-			if jump.active and hum then
-				hum.UseJumpPower = true
-				hum.JumpPower = jumpSlider.Get()
-			end
 			if not (char and hum and root) or hum.Health <= 0 then
 				return
+			end
+
+			-- Jump: set the jump power AND boost the launch velocity, because some games
+			-- ignore JumpPower. The boost fires once per jump.
+			if jump.active then
+				local power = jumpSlider.Get()
+				hum.UseJumpPower = true
+				hum.JumpPower = power
+				if hum:GetState() == Enum.HumanoidStateType.Jumping then
+					if not jumpBoosted then
+						jumpBoosted = true
+						local vel = root.AssemblyLinearVelocity
+						root.AssemblyLinearVelocity = Vector3.new(vel.X, power, vel.Z)
+					end
+				elseif hum.FloorMaterial ~= Enum.Material.Air then
+					jumpBoosted = false
+				end
+			elseif hum.FloorMaterial ~= Enum.Material.Air then
+				jumpBoosted = false
 			end
 
 			local wantSlip = speed.active and not flight.active and speedMethod.Get() == "Slippery"
@@ -713,6 +819,7 @@ return function(lib)
 		local charConn = LocalPlayer.CharacterAdded:Connect(function()
 			restoreFriction()
 			table.clear(noclipParts)
+			jumpBoosted = false
 		end)
 
 		-- ====================================================
@@ -729,7 +836,9 @@ return function(lib)
 			moveConn:Disconnect()
 			endConn:Disconnect()
 			steppedConn:Disconnect()
+			renderConn:Disconnect()
 			heartbeatConn:Disconnect()
+			gravitySignal:Disconnect()
 			charConn:Disconnect()
 		end
 		win.onClose(destroy)
