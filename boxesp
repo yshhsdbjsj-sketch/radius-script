@@ -3,12 +3,17 @@
 --   local buildBoxEsp = loadstring(game:HttpGet(BOXESP_URL))()(lib)
 --   buildBoxEsp({pages = pages, fadeInfo = fadeInfo, slideInfo = slideInfo, popup = popup})
 --
+-- Visuals page = one card:
+--   Enabled         master switch - everything below is locked until it is on
+--   Team check      only players who are NOT on your team
+--   Visible check   only players you can actually see (raycast)
+--   Render distance only players closer than this many studs
+--   Box Esp         the box itself (opens the color / style window under the menu)
+--
 -- behaviour:
---   * "Box Esp" switch on the Visuals page
---   * switching it on opens a settings window under the menu: color picker + style
---     (Full / Corners / 3D)
 --   * while the menu is OPEN the box only shows on the 3D avatar preview
---   * when the menu is HIDDEN (menu toggle key) the box draws on every player
+--   * when the menu is HIDDEN (menu toggle key) the box draws on every player that
+--     passes the checks
 --   * the preview and the real ESP always use the same color and style
 
 return function(lib)
@@ -67,6 +72,36 @@ return function(lib)
 			hh = hh / 6
 		end
 		return hh, (mx == 0) and 0 or d / mx, mx
+	end
+
+	-- ========================================================
+	-- checks: team / visible
+	-- ========================================================
+	-- true when the player is on your team (no teams in the game = nobody counts as teammate)
+	local function sameTeam(player)
+		local myTeam = LocalPlayer.Team
+		return myTeam ~= nil and player.Team == myTeam
+	end
+
+	local rayParams = RaycastParams.new()
+	rayParams.FilterType = Enum.RaycastFilterType.Exclude
+	rayParams.IgnoreWater = true
+
+	-- true if a ray from the camera reaches the head or the body of `char` unblocked
+	local function isVisible(char, camera)
+		local origin = camera.CFrame.Position
+		local myChar = LocalPlayer.Character
+		rayParams.FilterDescendantsInstances = myChar and {myChar} or {}
+		for _, name in ipairs({"Head", "HumanoidRootPart"}) do
+			local part = char:FindFirstChild(name)
+			if part then
+				local hit = workspace:Raycast(origin, part.Position - origin, rayParams)
+				if not hit or hit.Instance:IsDescendantOf(char) then
+					return true
+				end
+			end
+		end
+		return false
 	end
 
 	-- ========================================================
@@ -231,7 +266,13 @@ return function(lib)
 		-- ====================================================
 		-- state
 		-- ====================================================
-		local enabled = false
+		local master = false      -- "Enabled": everything is locked until this is on
+		local enabled = false     -- Box Esp switch
+		local teamCheck = false
+		local visCheck = false
+		local DIST_MIN, DIST_MAX, DIST_STEP = 50, 5000, 50
+		local renderDist = 1500
+
 		local style = "Full"
 		local h, s, v = 0, 0, 180 / 255 -- default color (180, 180, 180)
 		local color = Color3.fromHSV(h, s, v)
@@ -249,69 +290,209 @@ return function(lib)
 		end
 
 		-- ====================================================
-		-- Visuals page row: label + switch
+		-- Visuals page: ONE card holding every row
 		-- ====================================================
-		local row = Instance.new("Frame")
-		row.Name = "BoxEspRow"
-		row.Position = UDim2.fromOffset(20, 66)
-		row.Size = UDim2.new(1, -40, 0, 48)
-		row.BackgroundColor3 = Color3.fromRGB(28, 28, 32)
-		row.BorderSizePixel = 0
-		row.Parent = page
-		addCorner(row)
-		addStroke(row, Color3.fromRGB(42, 42, 47))
+		local CARD_BG = Color3.fromRGB(28, 28, 32)
+		local ROW_H, SLIDER_H = 44, 56
 
-		local label = Instance.new("TextLabel")
-		label.BackgroundTransparency = 1
-		label.Position = UDim2.fromOffset(16, 0)
-		label.Size = UDim2.new(0.5, 0, 1, 0)
-		label.Font = Enum.Font.GothamMedium
-		label.Text = "Box Esp"
-		label.TextColor3 = TEXT_MAIN
-		label.TextSize = 14
-		label.TextXAlignment = Enum.TextXAlignment.Left
-		label.Parent = row
+		local card = Instance.new("Frame")
+		card.Name = "VisualsCard"
+		card.Position = UDim2.fromOffset(20, 66)
+		card.Size = UDim2.new(1, -40, 0, 236)
+		card.BackgroundColor3 = CARD_BG
+		card.BorderSizePixel = 0
+		card.Parent = page
+		addCorner(card)
+		addStroke(card, Color3.fromRGB(42, 42, 47))
+
+		local function addRow(y, height)
+			local f = Instance.new("Frame")
+			f.BackgroundTransparency = 1
+			f.Position = UDim2.fromOffset(0, y)
+			f.Size = UDim2.new(1, 0, 0, height)
+			f.Parent = card
+			return f
+		end
+
+		local function addSeparator(y)
+			local f = Instance.new("Frame")
+			f.BackgroundColor3 = Color3.fromRGB(42, 42, 47)
+			f.BorderSizePixel = 0
+			f.Position = UDim2.fromOffset(12, y)
+			f.Size = UDim2.new(1, -24, 0, 1)
+			f.Parent = card
+		end
+
+		local function addRowLabel(parent, text, y)
+			local l = Instance.new("TextLabel")
+			l.BackgroundTransparency = 1
+			l.Position = UDim2.fromOffset(16, y or 0)
+			l.Size = UDim2.new(0.6, 0, y and 0, 1, 0)
+			l.Font = Enum.Font.GothamMedium
+			l.Text = text
+			l.TextColor3 = TEXT_MAIN
+			l.TextSize = 14
+			l.TextXAlignment = Enum.TextXAlignment.Left
+			l.Parent = parent
+			return l
+		end
 
 		local ON_TRACK = Color3.fromRGB(225, 225, 232)
 		local OFF_TRACK = Color3.fromRGB(44, 44, 50)
 		local ON_KNOB = Color3.fromRGB(22, 22, 25)
 		local OFF_KNOB = Color3.fromRGB(140, 140, 146)
 
-		local switch = Instance.new("TextButton")
-		switch.Name = "BoxEspSwitch"
-		switch.AnchorPoint = Vector2.new(1, 0.5)
-		switch.Position = UDim2.new(1, -12, 0.5, 0)
-		switch.Size = UDim2.fromOffset(46, 24)
-		switch.AutoButtonColor = false
-		switch.Text = ""
-		switch.BorderSizePixel = 0
-		switch.Parent = row
-		addCorner(switch, 7)
-		local switchStroke = addStroke(switch, Color3.fromRGB(60, 60, 66))
+		-- switch on the right edge of a row; onChange(on) runs on every change
+		local function makeSwitch(parent, onChange)
+			local isOn = false
 
-		local knob = Instance.new("Frame")
-		knob.AnchorPoint = Vector2.new(0, 0.5)
-		knob.Size = UDim2.fromOffset(18, 18)
-		knob.BorderSizePixel = 0
-		knob.Parent = switch
-		addCorner(knob, 5)
+			local switch = Instance.new("TextButton")
+			switch.AnchorPoint = Vector2.new(1, 0.5)
+			switch.Position = UDim2.new(1, -12, 0.5, 0)
+			switch.Size = UDim2.fromOffset(46, 24)
+			switch.AutoButtonColor = false
+			switch.Text = ""
+			switch.BorderSizePixel = 0
+			switch.Parent = parent
+			addCorner(switch, 7)
+			local switchStroke = addStroke(switch, Color3.fromRGB(60, 60, 66))
 
-		local function applySwitch(animate)
-			local info = animate and fadeInfo or TweenInfo.new(0)
-			TweenService:Create(switch, info, {BackgroundColor3 = enabled and ON_TRACK or OFF_TRACK}):Play()
-			TweenService:Create(knob, info, {
-				BackgroundColor3 = enabled and ON_KNOB or OFF_KNOB,
-				Position = UDim2.new(0, enabled and 25 or 3, 0.5, 0),
-			}):Play()
+			local knob = Instance.new("Frame")
+			knob.AnchorPoint = Vector2.new(0, 0.5)
+			knob.Size = UDim2.fromOffset(18, 18)
+			knob.BorderSizePixel = 0
+			knob.Parent = switch
+			addCorner(knob, 5)
+
+			local function apply(animate)
+				local info = animate and fadeInfo or TweenInfo.new(0)
+				TweenService:Create(switch, info, {BackgroundColor3 = isOn and ON_TRACK or OFF_TRACK}):Play()
+				TweenService:Create(knob, info, {
+					BackgroundColor3 = isOn and ON_KNOB or OFF_KNOB,
+					Position = UDim2.new(0, isOn and 25 or 3, 0.5, 0),
+				}):Play()
+			end
+			apply(false)
+
+			switch.MouseEnter:Connect(function()
+				TweenService:Create(switchStroke, fadeInfo, {Color = Color3.fromRGB(110, 110, 120)}):Play()
+			end)
+			switch.MouseLeave:Connect(function()
+				TweenService:Create(switchStroke, fadeInfo, {Color = Color3.fromRGB(60, 60, 66)}):Play()
+			end)
+
+			local obj = {}
+			function obj.Set(value)
+				isOn = value and true or false
+				apply(true)
+				onChange(isOn)
+			end
+			switch.MouseButton1Click:Connect(function()
+				obj.Set(not isOn)
+			end)
+			return obj
 		end
-		applySwitch(false)
 
-		switch.MouseEnter:Connect(function()
-			TweenService:Create(switchStroke, fadeInfo, {Color = Color3.fromRGB(110, 110, 120)}):Play()
+		-- row 1: Enabled (master)
+		local masterRow = addRow(0, ROW_H)
+		addRowLabel(masterRow, "Enabled")
+		-- rows 2-5 live below the master row; a dim overlay (below) blocks them while it is off
+		addSeparator(ROW_H)
+
+		local teamRow = addRow(45, ROW_H)
+		addRowLabel(teamRow, "Team check")
+		addSeparator(89)
+
+		local visRow = addRow(90, ROW_H)
+		addRowLabel(visRow, "Visible check")
+		addSeparator(134)
+
+		local distRow = addRow(135, SLIDER_H)
+		addRowLabel(distRow, "Render distance", 6).Size = UDim2.new(0.6, 0, 0, 18)
+		addSeparator(191)
+
+		local boxRow = addRow(192, ROW_H)
+		addRowLabel(boxRow, "Box Esp")
+
+		local masterSwitch = makeSwitch(masterRow, function(on)
+			master = on
 		end)
-		switch.MouseLeave:Connect(function()
-			TweenService:Create(switchStroke, fadeInfo, {Color = Color3.fromRGB(60, 60, 66)}):Play()
+		local teamSwitch = makeSwitch(teamRow, function(on)
+			teamCheck = on
 		end)
+		local visSwitch = makeSwitch(visRow, function(on)
+			visCheck = on
+		end)
+		local boxSwitch = makeSwitch(boxRow, function(on)
+			enabled = on
+		end)
+
+		-- ---------- render distance slider ----------
+		local distValue = Instance.new("TextLabel")
+		distValue.BackgroundTransparency = 1
+		distValue.AnchorPoint = Vector2.new(1, 0)
+		distValue.Position = UDim2.new(1, -16, 0, 6)
+		distValue.Size = UDim2.fromOffset(110, 18)
+		distValue.Font = Enum.Font.GothamMedium
+		distValue.TextColor3 = Color3.fromRGB(190, 190, 196)
+		distValue.TextSize = 12
+		distValue.TextXAlignment = Enum.TextXAlignment.Right
+		distValue.Parent = distRow
+
+		local distTrack = Instance.new("Frame")
+		distTrack.Position = UDim2.new(0, 16, 0, 38)
+		distTrack.Size = UDim2.new(1, -32, 0, 4)
+		distTrack.BackgroundColor3 = OFF_TRACK
+		distTrack.BorderSizePixel = 0
+		distTrack.Parent = distRow
+		addCorner(distTrack, 2)
+
+		local distFill = Instance.new("Frame")
+		distFill.BackgroundColor3 = ON_TRACK
+		distFill.BorderSizePixel = 0
+		distFill.Size = UDim2.fromScale(0, 1)
+		distFill.Parent = distTrack
+		addCorner(distFill, 2)
+
+		local distKnob = Instance.new("Frame")
+		distKnob.AnchorPoint = Vector2.new(0.5, 0.5)
+		distKnob.Size = UDim2.fromOffset(12, 12)
+		distKnob.BackgroundColor3 = Color3.fromRGB(245, 245, 248)
+		distKnob.BorderSizePixel = 0
+		distKnob.ZIndex = 2
+		distKnob.Parent = distTrack
+		addCorner(distKnob, 6)
+
+		local function setDistance(value)
+			renderDist = math.clamp(value, DIST_MIN, DIST_MAX)
+			local a = (renderDist - DIST_MIN) / (DIST_MAX - DIST_MIN)
+			distFill.Size = UDim2.fromScale(a, 1)
+			distKnob.Position = UDim2.fromScale(a, 0.5)
+			distValue.Text = renderDist .. " studs"
+		end
+		setDistance(renderDist)
+
+		local distHit = Instance.new("TextButton")
+		distHit.BackgroundTransparency = 1
+		distHit.AutoButtonColor = false
+		distHit.Text = ""
+		distHit.Position = UDim2.new(0, 10, 0, 28)
+		distHit.Size = UDim2.new(1, -20, 0, 24)
+		distHit.ZIndex = 3
+		distHit.Parent = distRow
+
+		-- dim overlay: covers every row under "Enabled" and swallows clicks while the master is off
+		local lock = Instance.new("Frame")
+		lock.Name = "Lock"
+		lock.Position = UDim2.fromOffset(0, 45)
+		lock.Size = UDim2.new(1, 0, 1, -45)
+		lock.BackgroundColor3 = Color3.fromRGB(18, 18, 21)
+		lock.BackgroundTransparency = 0.4
+		lock.BorderSizePixel = 0
+		lock.Active = true
+		lock.ZIndex = 10
+		lock.Parent = card
+		addCorner(lock)
 
 		-- ====================================================
 		-- settings window (connected under the main window)
@@ -631,7 +812,7 @@ return function(lib)
 			hexBox.Text = toHex(color)
 		end)
 
-		-- ---------- dragging the picker ----------
+		-- ---------- dragging the picker + distance slider ----------
 		-- the pointer coordinate space differs between executors/GUI-inset settings,
 		-- so on press we pick the candidate that actually lies inside the pressed element
 		-- and keep the difference as a calibration offset
@@ -669,12 +850,20 @@ return function(lib)
 			if dragTarget == "sv" then
 				s = math.clamp((m.X - ap.X) / as.X, 0, 1)
 				v = 1 - math.clamp((m.Y - ap.Y) / as.Y, 0, 1)
+				refreshColor()
 			elseif dragTarget == "hue" then
 				h = math.clamp((m.Y - ap.Y) / as.Y, 0, 0.999)
+				refreshColor()
+			elseif dragTarget == "dist" then
+				-- the hit area is a little wider than the track, so measure on the track itself
+				local tp, ts = distTrack.AbsolutePosition, distTrack.AbsoluteSize
+				local a = math.clamp((m.X - tp.X) / ts.X, 0, 1)
+				local value = DIST_MIN + a * (DIST_MAX - DIST_MIN)
+				setDistance(math.floor(value / DIST_STEP + 0.5) * DIST_STEP)
 			else
 				alpha = 1 - math.clamp((m.Y - ap.Y) / as.Y, 0, 1)
+				refreshColor()
 			end
-			refreshColor()
 		end
 
 		local function isPress(input)
@@ -683,7 +872,7 @@ return function(lib)
 
 		local function bindDrag(hit, target)
 			hit.InputBegan:Connect(function(input)
-				if isPress(input) then
+				if isPress(input) and master then
 					dragTarget = target
 					dragHit = hit
 					calibrate(input, hit)
@@ -694,6 +883,7 @@ return function(lib)
 		bindDrag(svHit, "sv")
 		bindDrag(hueHit, "hue")
 		bindDrag(alphaHit, "alpha")
+		bindDrag(distHit, "dist")
 		local moveConn = UserInputService.InputChanged:Connect(function(input)
 			if dragTarget and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
 				applyDrag()
@@ -708,7 +898,7 @@ return function(lib)
 		-- ---------- show / hide the settings window ----------
 		local settingsShown = false
 		local function updateSettings()
-			local wanted = enabled and page.Visible
+			local wanted = master and enabled and page.Visible
 			if wanted ~= settingsShown then
 				settingsShown = wanted
 				if wanted then
@@ -788,7 +978,7 @@ return function(lib)
 
 		local function updatePreview()
 			local viewport = findViewport()
-			if not (enabled and popup and popup.Visible and viewport) then
+			if not (master and enabled and popup and popup.Visible and viewport) then
 				hidePreview()
 				return
 			end
@@ -876,8 +1066,8 @@ return function(lib)
 
 		local wasActive = false
 		local function updateEsp()
-			-- menu open -> nothing on the real players
-			local active = hasDrawing and enabled and win.gui.Parent ~= nil and not win.gui.Enabled
+			-- master off, Box Esp off, or menu open -> nothing on the real players
+			local active = hasDrawing and master and enabled and win.gui.Parent ~= nil and not win.gui.Enabled
 			if not active then
 				if wasActive then
 					hideAll()
@@ -892,13 +1082,27 @@ return function(lib)
 				return
 			end
 			local project = makeProjector(camera)
+			local camPos = camera.CFrame.Position
 			for _, player in ipairs(Players:GetPlayers()) do
 				if player ~= LocalPlayer then
 					local char = player.Character
 					local hum = char and char:FindFirstChildOfClass("Humanoid")
+					local root = char and char:FindFirstChild("HumanoidRootPart")
 					local count = 0
-					if char and hum and hum.Health > 0 then
-						count = computeSegments(char, project, style)
+					if char and hum and root and hum.Health > 0 then
+						local pass = true
+						if teamCheck and sameTeam(player) then
+							pass = false
+						end
+						if pass and (root.Position - camPos).Magnitude > renderDist then
+							pass = false
+						end
+						if pass and visCheck and not isVisible(char, camera) then
+							pass = false
+						end
+						if pass then
+							count = computeSegments(char, project, style)
+						end
 					end
 					if count > 0 or boxes[player] then
 						drawBox(getBox(player), count)
@@ -908,16 +1112,12 @@ return function(lib)
 		end
 
 		local renderConn = RunService.RenderStepped:Connect(function()
+			lock.Visible = not master
 			updateSettings()
 			updatePreview()
 			updateEsp()
 		end)
 		local removingConn = Players.PlayerRemoving:Connect(removeBox)
-
-		switch.MouseButton1Click:Connect(function()
-			enabled = not enabled
-			applySwitch(true)
-		end)
 
 		local function destroy()
 			renderConn:Disconnect()
@@ -935,12 +1135,23 @@ return function(lib)
 		win.onClose(destroy)
 
 		return {
+			SetMaster = function(value)
+				masterSwitch.Set(value)
+			end,
 			SetEnabled = function(value)
-				enabled = value and true or false
-				applySwitch(true)
+				boxSwitch.Set(value)
 			end,
 			IsEnabled = function()
-				return enabled
+				return master and enabled
+			end,
+			SetTeamCheck = function(value)
+				teamSwitch.Set(value)
+			end,
+			SetVisibleCheck = function(value)
+				visSwitch.Set(value)
+			end,
+			SetRenderDistance = function(studs)
+				setDistance(math.floor(studs / DIST_STEP + 0.5) * DIST_STEP)
 			end,
 			SetStyle = function(name)
 				if indexOf(STYLES, name) then
