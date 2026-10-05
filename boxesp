@@ -3,12 +3,14 @@
 --   local buildBoxEsp = loadstring(game:HttpGet(BOXESP_URL))()(lib)
 --   buildBoxEsp({pages = pages, fadeInfo = fadeInfo, slideInfo = slideInfo, popup = popup})
 --
--- Visuals page = one card:
---   Enabled         master switch - everything below is locked until it is on
---   Team check      only players who are NOT on your team
---   Visible check   only players you can actually see (raycast)
---   Render distance only players closer than this many studs
---   Box Esp         the box itself (opens the color / style window under the menu)
+-- Visuals page = two cards:
+--   Card 1:
+--     Enabled         master switch - the controls below are locked (faded, unclickable) until it is on
+--     Team check      only players who are NOT on your team
+--     Visible check   only players you can actually see (raycast)
+--     Render distance only players closer than this many studs
+--   Card 2 (separate):
+--     Box Esp         the box itself (opens the color / style window under the menu)
 --
 -- behaviour:
 --   * while the menu is OPEN the box only shows on the 3D avatar preview
@@ -266,7 +268,7 @@ return function(lib)
 		-- ====================================================
 		-- state
 		-- ====================================================
-		local master = false      -- "Enabled": everything is locked until this is on
+		local master = false      -- "Enabled": the controls below are locked until this is on
 		local enabled = false     -- Box Esp switch
 		local teamCheck = false
 		local visCheck = false
@@ -290,44 +292,63 @@ return function(lib)
 		end
 
 		-- ====================================================
-		-- Visuals page: ONE card holding every row
+		-- Visuals page: card 1 (Enabled / checks / distance) + card 2 (Box Esp)
 		-- ====================================================
 		local CARD_BG = Color3.fromRGB(28, 28, 32)
+		local CARD_STROKE = Color3.fromRGB(42, 42, 47)
 		local ROW_H, SLIDER_H = 44, 56
+		local CARD1_H = 191
+		local CARD_GAP = 10
 
 		local card = Instance.new("Frame")
 		card.Name = "VisualsCard"
 		card.Position = UDim2.fromOffset(20, 66)
-		card.Size = UDim2.new(1, -40, 0, 236)
+		card.Size = UDim2.new(1, -40, 0, CARD1_H)
 		card.BackgroundColor3 = CARD_BG
 		card.BorderSizePixel = 0
 		card.Parent = page
 		addCorner(card)
-		addStroke(card, Color3.fromRGB(42, 42, 47))
+		addStroke(card, CARD_STROKE)
 
-		local function addRow(y, height)
+		local boxCard = Instance.new("Frame")
+		boxCard.Name = "BoxEspCard"
+		boxCard.Position = UDim2.fromOffset(20, 66 + CARD1_H + CARD_GAP)
+		boxCard.Size = UDim2.new(1, -40, 0, ROW_H)
+		boxCard.BackgroundColor3 = CARD_BG
+		boxCard.BorderSizePixel = 0
+		boxCard.Parent = page
+		addCorner(boxCard)
+		addStroke(boxCard, CARD_STROKE)
+
+		local function addRow(y, height, parent)
 			local f = Instance.new("Frame")
 			f.BackgroundTransparency = 1
 			f.Position = UDim2.fromOffset(0, y)
 			f.Size = UDim2.new(1, 0, 0, height)
-			f.Parent = card
+			f.Parent = parent or card
 			return f
 		end
 
 		local function addSeparator(y)
 			local f = Instance.new("Frame")
-			f.BackgroundColor3 = Color3.fromRGB(42, 42, 47)
+			f.BackgroundColor3 = CARD_STROKE
 			f.BorderSizePixel = 0
 			f.Position = UDim2.fromOffset(12, y)
 			f.Size = UDim2.new(1, -24, 0, 1)
 			f.Parent = card
 		end
 
+		-- y == nil -> label is vertically centered across the whole row
+		-- y given  -> label sits at that offset with a fixed height (used above the slider)
 		local function addRowLabel(parent, text, y)
 			local l = Instance.new("TextLabel")
 			l.BackgroundTransparency = 1
 			l.Position = UDim2.fromOffset(16, y or 0)
-			l.Size = UDim2.new(0.6, 0, y and 0, 1, 0)
+			if y then
+				l.Size = UDim2.new(0.6, 0, 0, 18)
+			else
+				l.Size = UDim2.new(0.6, 0, 1, 0)
+			end
 			l.Font = Enum.Font.GothamMedium
 			l.Text = text
 			l.TextColor3 = TEXT_MAIN
@@ -341,9 +362,11 @@ return function(lib)
 		local OFF_TRACK = Color3.fromRGB(44, 44, 50)
 		local ON_KNOB = Color3.fromRGB(22, 22, 25)
 		local OFF_KNOB = Color3.fromRGB(140, 140, 146)
+		local LOCKED_T = 0.6 -- transparency of a locked control
 
 		-- switch on the right edge of a row; onChange(on) runs on every change
-		local function makeSwitch(parent, onChange)
+		-- gated = true -> the switch ignores clicks while "Enabled" (master) is off
+		local function makeSwitch(parent, onChange, gated)
 			local isOn = false
 
 			local switch = Instance.new("TextButton")
@@ -364,6 +387,8 @@ return function(lib)
 			knob.Parent = switch
 			addCorner(knob, 5)
 
+			local locked = false
+
 			local function apply(animate)
 				local info = animate and fadeInfo or TweenInfo.new(0)
 				TweenService:Create(switch, info, {BackgroundColor3 = isOn and ON_TRACK or OFF_TRACK}):Play()
@@ -375,6 +400,9 @@ return function(lib)
 			apply(false)
 
 			switch.MouseEnter:Connect(function()
+				if locked then
+					return
+				end
 				TweenService:Create(switchStroke, fadeInfo, {Color = Color3.fromRGB(110, 110, 120)}):Play()
 			end)
 			switch.MouseLeave:Connect(function()
@@ -387,16 +415,26 @@ return function(lib)
 				apply(true)
 				onChange(isOn)
 			end
+			-- faded look while locked
+			function obj.SetLocked(value)
+				locked = value
+				local t = value and LOCKED_T or 0
+				TweenService:Create(switch, fadeInfo, {BackgroundTransparency = t}):Play()
+				TweenService:Create(knob, fadeInfo, {BackgroundTransparency = t}):Play()
+				TweenService:Create(switchStroke, fadeInfo, {Transparency = t}):Play()
+			end
 			switch.MouseButton1Click:Connect(function()
+				if gated and not master then
+					return -- locked while "Enabled" is off
+				end
 				obj.Set(not isOn)
 			end)
 			return obj
 		end
 
-		-- row 1: Enabled (master)
+		-- card 1 rows
 		local masterRow = addRow(0, ROW_H)
 		addRowLabel(masterRow, "Enabled")
-		-- rows 2-5 live below the master row; a dim overlay (below) blocks them while it is off
 		addSeparator(ROW_H)
 
 		local teamRow = addRow(45, ROW_H)
@@ -408,24 +446,24 @@ return function(lib)
 		addSeparator(134)
 
 		local distRow = addRow(135, SLIDER_H)
-		addRowLabel(distRow, "Render distance", 6).Size = UDim2.new(0.6, 0, 0, 18)
-		addSeparator(191)
+		addRowLabel(distRow, "Render distance", 6)
 
-		local boxRow = addRow(192, ROW_H)
+		-- card 2 row
+		local boxRow = addRow(0, ROW_H, boxCard)
 		addRowLabel(boxRow, "Box Esp")
 
 		local masterSwitch = makeSwitch(masterRow, function(on)
 			master = on
-		end)
+		end, false)
 		local teamSwitch = makeSwitch(teamRow, function(on)
 			teamCheck = on
-		end)
+		end, true)
 		local visSwitch = makeSwitch(visRow, function(on)
 			visCheck = on
-		end)
+		end, true)
 		local boxSwitch = makeSwitch(boxRow, function(on)
 			enabled = on
-		end)
+		end, true)
 
 		-- ---------- render distance slider ----------
 		local distValue = Instance.new("TextLabel")
@@ -481,18 +519,24 @@ return function(lib)
 		distHit.ZIndex = 3
 		distHit.Parent = distRow
 
-		-- dim overlay: covers every row under "Enabled" and swallows clicks while the master is off
-		local lock = Instance.new("Frame")
-		lock.Name = "Lock"
-		lock.Position = UDim2.fromOffset(0, 45)
-		lock.Size = UDim2.new(1, 0, 1, -45)
-		lock.BackgroundColor3 = Color3.fromRGB(18, 18, 21)
-		lock.BackgroundTransparency = 0.4
-		lock.BorderSizePixel = 0
-		lock.Active = true
-		lock.ZIndex = 10
-		lock.Parent = card
-		addCorner(lock)
+		-- ---------- locking: everything except "Enabled" fades and ignores input while master is off ----------
+		local lastLocked
+		local function refreshLocks()
+			local locked = not master
+			if locked == lastLocked then
+				return
+			end
+			lastLocked = locked
+			teamSwitch.SetLocked(locked)
+			visSwitch.SetLocked(locked)
+			boxSwitch.SetLocked(locked)
+			local t = locked and LOCKED_T or 0
+			TweenService:Create(distTrack, fadeInfo, {BackgroundTransparency = t}):Play()
+			TweenService:Create(distFill, fadeInfo, {BackgroundTransparency = t}):Play()
+			TweenService:Create(distKnob, fadeInfo, {BackgroundTransparency = t}):Play()
+			TweenService:Create(distValue, fadeInfo, {TextTransparency = locked and 0.5 or 0}):Play()
+		end
+		refreshLocks()
 
 		-- ====================================================
 		-- settings window (connected under the main window)
@@ -872,6 +916,7 @@ return function(lib)
 
 		local function bindDrag(hit, target)
 			hit.InputBegan:Connect(function(input)
+				-- locked while "Enabled" is off
 				if isPress(input) and master then
 					dragTarget = target
 					dragHit = hit
@@ -1112,7 +1157,7 @@ return function(lib)
 		end
 
 		local renderConn = RunService.RenderStepped:Connect(function()
-			lock.Visible = not master
+			refreshLocks()
 			updateSettings()
 			updatePreview()
 			updateEsp()
@@ -1131,6 +1176,7 @@ return function(lib)
 				l:Destroy()
 			end
 			settings:Destroy()
+			boxCard:Destroy()
 		end
 		win.onClose(destroy)
 
