@@ -1,22 +1,26 @@
--- boxesp module (Visuals tab)
+-- esp module (Visuals tab): Box / Name / Health bar / Skeleton
 -- usage in the main script (unchanged):
 --   local buildBoxEsp = loadstring(game:HttpGet(BOXESP_URL))()(lib)
 --   buildBoxEsp({pages = pages, fadeInfo = fadeInfo, slideInfo = slideInfo, popup = popup})
 --
 -- Visuals page = two cards:
 --   Card 1:
---     Enabled         master switch - the controls below are locked (faded, unclickable) until it is on
+--     Enabled         master switch - everything else is locked (faded, unclickable) until it is on
 --     Team check      only players who are NOT on your team
 --     Visible check   only players you can actually see (raycast)
 --     Render distance only players closer than this many studs
---   Card 2 (separate):
---     Box Esp         the box itself (opens the color / style window under the menu)
+--   Card 2 (one row per feature, each with a switch + a "Settings" button):
+--     Box Esp         style (Full / Corners / 3D), color + alpha
+--     Name Esp        source (Display / Username / Both), distance on/off, color + alpha
+--     Health Bar      mode (Solid / Gradient), Full / Mid / Low colors
+--     Skeleton Esp    color + alpha, thickness
 --
 -- behaviour:
---   * while the menu is OPEN the box only shows on the 3D avatar preview
---   * when the menu is HIDDEN (menu toggle key) the box draws on every player that
---     passes the checks
---   * the preview and the real ESP always use the same color and style
+--   * the settings window under the menu shows the feature you selected
+--     (turning a feature on selects it, "Settings" toggles it)
+--   * while the menu is OPEN the features only show on the 3D avatar preview
+--   * when the menu is HIDDEN (menu toggle key) they draw on every player that passes the checks
+--   * the preview and the real ESP always use the same colors and styles
 
 return function(lib)
 	local Players = lib.Players
@@ -32,6 +36,9 @@ return function(lib)
 	local THICKNESS = 1.5
 	local PAD = 2
 	local SEG_MAX = 12
+	local BONE_MAX = 14
+	local HP_SEGS = 16 -- gradient resolution of the health bar
+	local HP_W = 3     -- health bar width in pixels
 
 	local R15_PARTS = {
 		"Head", "UpperTorso", "LowerTorso",
@@ -41,6 +48,18 @@ return function(lib)
 		"LeftFoot", "RightFoot",
 	}
 	local R6_PARTS = {"Head", "Torso", "Left Arm", "Right Arm", "Left Leg", "Right Leg"}
+
+	local R15_BONES = {
+		{"Head", "UpperTorso"}, {"UpperTorso", "LowerTorso"},
+		{"UpperTorso", "LeftUpperArm"}, {"LeftUpperArm", "LeftLowerArm"}, {"LeftLowerArm", "LeftHand"},
+		{"UpperTorso", "RightUpperArm"}, {"RightUpperArm", "RightLowerArm"}, {"RightLowerArm", "RightHand"},
+		{"LowerTorso", "LeftUpperLeg"}, {"LeftUpperLeg", "LeftLowerLeg"}, {"LeftLowerLeg", "LeftFoot"},
+		{"LowerTorso", "RightUpperLeg"}, {"RightUpperLeg", "RightLowerLeg"}, {"RightLowerLeg", "RightFoot"},
+	}
+	local R6_BONES = {
+		{"Head", "Torso"}, {"Torso", "Left Arm"}, {"Torso", "Right Arm"},
+		{"Torso", "Left Leg"}, {"Torso", "Right Leg"},
+	}
 
 	-- ========================================================
 	-- helpers that don't depend on optional executor APIs
@@ -107,12 +126,16 @@ return function(lib)
 	end
 
 	-- ========================================================
-	-- geometry: one function turns a character into line segments
+	-- geometry: characters -> line segments / bounds
 	-- (used by both the Drawing ESP and the GUI preview)
 	-- ========================================================
-	local segs = {}
+	local segs = {}   -- box segments
 	for i = 1, SEG_MAX do
 		segs[i] = {0, 0, 0, 0}
+	end
+	local bones = {}  -- skeleton segments
+	for i = 1, BONE_MAX do
+		bones[i] = {0, 0, 0, 0}
 	end
 
 	local function setSeg(i, ax, ay, bx, by)
@@ -144,73 +167,11 @@ return function(lib)
 		end
 	end
 
-	-- 12 edges of a box; corner c (0-7): bit0 = X, bit1 = Y, bit2 = Z (0 = min, 1 = max)
-	local EDGES3D = {}
-	for c = 0, 7 do
-		for _, bit in ipairs({1, 2, 4}) do
-			if not hasBit(c, bit) then
-				table.insert(EDGES3D, {c + 1, c + bit + 1})
-			end
-		end
-	end
-	local cornerX, cornerY = {}, {}
+	-- screen-space bounds of every body part (shared by 2D box, name and health bar)
+	local bnd = {minX = 0, minY = 0, maxX = 0, maxY = 0}
 
-	-- fills `segs`, returns how many segments to draw (0 = hide)
-	local function computeSegments(char, project, style)
+	local function computeBounds(char, project)
 		local parts = char:FindFirstChild("UpperTorso") and R15_PARTS or R6_PARTS
-
-		if style == "3D" then
-			-- box that rotates with the character (measured in the root part's space)
-			local root = char:FindFirstChild("HumanoidRootPart")
-				or char:FindFirstChild("UpperTorso")
-				or char:FindFirstChild("Torso")
-			if not root then
-				return 0
-			end
-			local rootCF = root.CFrame
-			local loX, loY, loZ = math.huge, math.huge, math.huge
-			local hiX, hiY, hiZ = -math.huge, -math.huge, -math.huge
-			local any = false
-			for _, name in ipairs(parts) do
-				local part = char:FindFirstChild(name)
-				if part then
-					local cf, half = part.CFrame, part.Size / 2
-					for ix = -1, 1, 2 do
-						for iy = -1, 1, 2 do
-							for iz = -1, 1, 2 do
-								local lp = rootCF:PointToObjectSpace(cf:PointToWorldSpace(Vector3.new(half.X * ix, half.Y * iy, half.Z * iz)))
-								any = true
-								if lp.X < loX then loX = lp.X end
-								if lp.Y < loY then loY = lp.Y end
-								if lp.Z < loZ then loZ = lp.Z end
-								if lp.X > hiX then hiX = lp.X end
-								if lp.Y > hiY then hiY = lp.Y end
-								if lp.Z > hiZ then hiZ = lp.Z end
-							end
-						end
-					end
-				end
-			end
-			if not any then
-				return 0
-			end
-			for c = 0, 7 do
-				local lx = hasBit(c, 1) and hiX or loX
-				local ly = hasBit(c, 2) and hiY or loY
-				local lz = hasBit(c, 4) and hiZ or loZ
-				local x, y, visible = project(rootCF:PointToWorldSpace(Vector3.new(lx, ly, lz)))
-				if not visible then
-					return 0
-				end
-				cornerX[c + 1], cornerY[c + 1] = x, y
-			end
-			for i, e in ipairs(EDGES3D) do
-				setSeg(i, cornerX[e[1]], cornerY[e[1]], cornerX[e[2]], cornerY[e[2]])
-			end
-			return #EDGES3D
-		end
-
-		-- 2D boxes (Full / Corners): screen-space bounds of every body part
 		local minX, minY = math.huge, math.huge
 		local maxX, maxY = -math.huge, -math.huge
 		local any = false
@@ -235,9 +196,85 @@ return function(lib)
 			end
 		end
 		if not any then
+			return false
+		end
+		bnd.minX, bnd.minY, bnd.maxX, bnd.maxY = minX, minY, maxX, maxY
+		return true
+	end
+
+	-- 12 edges of a box; corner c (0-7): bit0 = X, bit1 = Y, bit2 = Z (0 = min, 1 = max)
+	local EDGES3D = {}
+	for c = 0, 7 do
+		for _, bit in ipairs({1, 2, 4}) do
+			if not hasBit(c, bit) then
+				table.insert(EDGES3D, {c + 1, c + bit + 1})
+			end
+		end
+	end
+	local cornerX, cornerY = {}, {}
+
+	-- box that rotates with the character (measured in the root part's space)
+	local function computeBox3D(char, project)
+		local parts = char:FindFirstChild("UpperTorso") and R15_PARTS or R6_PARTS
+		local root = char:FindFirstChild("HumanoidRootPart")
+			or char:FindFirstChild("UpperTorso")
+			or char:FindFirstChild("Torso")
+		if not root then
 			return 0
 		end
+		local rootCF = root.CFrame
+		local loX, loY, loZ = math.huge, math.huge, math.huge
+		local hiX, hiY, hiZ = -math.huge, -math.huge, -math.huge
+		local any = false
+		for _, name in ipairs(parts) do
+			local part = char:FindFirstChild(name)
+			if part then
+				local cf, half = part.CFrame, part.Size / 2
+				for ix = -1, 1, 2 do
+					for iy = -1, 1, 2 do
+						for iz = -1, 1, 2 do
+							local lp = rootCF:PointToObjectSpace(cf:PointToWorldSpace(Vector3.new(half.X * ix, half.Y * iy, half.Z * iz)))
+							any = true
+							if lp.X < loX then loX = lp.X end
+							if lp.Y < loY then loY = lp.Y end
+							if lp.Z < loZ then loZ = lp.Z end
+							if lp.X > hiX then hiX = lp.X end
+							if lp.Y > hiY then hiY = lp.Y end
+							if lp.Z > hiZ then hiZ = lp.Z end
+						end
+					end
+				end
+			end
+		end
+		if not any then
+			return 0
+		end
+		for c = 0, 7 do
+			local lx = hasBit(c, 1) and hiX or loX
+			local ly = hasBit(c, 2) and hiY or loY
+			local lz = hasBit(c, 4) and hiZ or loZ
+			local x, y, visible = project(rootCF:PointToWorldSpace(Vector3.new(lx, ly, lz)))
+			if not visible then
+				return 0
+			end
+			cornerX[c + 1], cornerY[c + 1] = x, y
+		end
+		for i, e in ipairs(EDGES3D) do
+			setSeg(i, cornerX[e[1]], cornerY[e[1]], cornerX[e[2]], cornerY[e[2]])
+		end
+		return #EDGES3D
+	end
 
+	-- fills `segs`, returns how many segments to draw (0 = hide)
+	-- hasBounds = computeBounds() succeeded for this character (needed for 2D styles)
+	local function computeBox(char, project, style, hasBounds)
+		if style == "3D" then
+			return computeBox3D(char, project)
+		end
+		if not hasBounds then
+			return 0
+		end
+		local minX, minY, maxX, maxY = bnd.minX, bnd.minY, bnd.maxX, bnd.maxY
 		local x0, y0, x1, y1 = minX - PAD, minY - PAD, maxX + PAD, maxY + PAD
 		if style == "Corners" then
 			local cw = math.min((maxX - minX) * 0.25, 12)
@@ -259,6 +296,25 @@ return function(lib)
 		return 4
 	end
 
+	-- fills `bones`, returns how many bones to draw
+	local function computeSkeleton(char, project)
+		local list = char:FindFirstChild("UpperTorso") and R15_BONES or R6_BONES
+		local n = 0
+		for _, pair in ipairs(list) do
+			local a, b = char:FindFirstChild(pair[1]), char:FindFirstChild(pair[2])
+			if a and b then
+				local ax, ay, av = project(a.Position)
+				local bx, by, bv = project(b.Position)
+				if av and bv then
+					n = n + 1
+					local s = bones[n]
+					s[1], s[2], s[3], s[4] = ax, ay, bx, by
+				end
+			end
+		end
+		return n
+	end
+
 	return function(ctx)
 		local page = ctx.pages["Visuals"]
 		local fadeInfo = ctx.fadeInfo
@@ -268,37 +324,146 @@ return function(lib)
 		-- ====================================================
 		-- state
 		-- ====================================================
-		local master = false      -- "Enabled": the controls below are locked until this is on
-		local enabled = false     -- Box Esp switch
+		local master = false      -- "Enabled": everything below is locked until this is on
 		local teamCheck = false
 		local visCheck = false
 		local DIST_MIN, DIST_MAX, DIST_STEP = 50, 5000, 50
 		local renderDist = 1500
 
-		local style = "Full"
-		local h, s, v = 0, 0, 180 / 255 -- default color (180, 180, 180)
-		local color = Color3.fromHSV(h, s, v)
-		local styleVersion = 0
-		local alpha = 1 -- 1 = opaque, 0 = invisible
+		local FEATURES = {"Box", "Name", "Health", "Skeleton"}
+		local LABELS = {Box = "Box Esp", Name = "Name Esp", Health = "Health Bar", Skeleton = "Skeleton Esp"}
+		local feat = {Box = false, Name = false, Health = false, Skeleton = false}
+		local selected = nil -- which feature's settings window is open
+
+		local style = "Full"          -- Box: Full / Corners / 3D
+		local nameSource = "Display"  -- Name: Display / Username / Both
+		local nameDist = false        -- Name: append the distance
+		local hpMode = "Gradient"     -- Health: Solid / Gradient
+		local skelThick = 1           -- Skeleton line thickness
+
+		-- color slots: h/s/v (0-1) + a (1 = opaque, 0 = invisible)
+		local function newSlot(c, a)
+			local hh, ss, vv = rgbToHsv(c)
+			return {h = math.min(hh, 0.999), s = ss, v = vv, a = a or 1}
+		end
+		local function colorOf(slot)
+			return Color3.fromHSV(slot.h, slot.s, slot.v)
+		end
+
+		local slots = {
+			box = newSlot(Color3.fromRGB(180, 180, 180)),
+			name = newSlot(Color3.fromRGB(255, 255, 255)),
+			skel = newSlot(Color3.fromRGB(180, 180, 180)),
+			hpFull = newSlot(Color3.fromRGB(60, 220, 90)),
+			hpMid = newSlot(Color3.fromRGB(240, 210, 60)),
+			hpLow = newSlot(Color3.fromRGB(235, 60, 60)),
+		}
+
+		local function anyOn()
+			return feat.Box or feat.Name or feat.Health or feat.Skeleton
+		end
+
 		-- set to true if your executor's Drawing Transparency is reversed (0 = opaque)
 		local DRAWING_ALPHA_INVERTED = false
-		local function drawingAlpha()
-			return DRAWING_ALPHA_INVERTED and (1 - alpha) or alpha
+		local function dAlpha(a)
+			return DRAWING_ALPHA_INVERTED and (1 - a) or a
 		end
 
 		local hasDrawing = typeof(Drawing) == "table" or (Drawing ~= nil and Drawing.new ~= nil)
 		if not hasDrawing then
-			warn("[boxesp] Drawing library not available - only the preview will work")
+			warn("[esp] Drawing library not available - only the preview will work")
 		end
 
 		-- ====================================================
-		-- Visuals page: card 1 (Enabled / checks / distance) + card 2 (Box Esp)
+		-- colors / constants
 		-- ====================================================
 		local CARD_BG = Color3.fromRGB(28, 28, 32)
 		local CARD_STROKE = Color3.fromRGB(42, 42, 47)
+		local PANEL_BG = Color3.fromRGB(22, 22, 25)
+		local PANEL_STROKE = Color3.fromRGB(42, 42, 47)
+		local FIELD_STROKE = Color3.fromRGB(46, 46, 51)
+		local TEXT_DIM = Color3.fromRGB(110, 110, 116)
+		local TEXT_SOFT = Color3.fromRGB(190, 190, 196)
+		local ON_TRACK = Color3.fromRGB(225, 225, 232)
+		local OFF_TRACK = Color3.fromRGB(44, 44, 50)
+		local ON_KNOB = Color3.fromRGB(22, 22, 25)
+		local OFF_KNOB = Color3.fromRGB(140, 140, 146)
+		local LOCKED_T = 0.6 -- transparency of a locked control
 		local ROW_H, SLIDER_H = 44, 56
+
+		local function toHex(c)
+			return string.format("#%02X%02X%02X", math.floor(c.R * 255 + 0.5), math.floor(c.G * 255 + 0.5), math.floor(c.B * 255 + 0.5))
+		end
+
+		-- ====================================================
+		-- dragging (color pickers + distance slider)
+		-- ====================================================
+		-- the pointer coordinate space differs between executors/GUI-inset settings,
+		-- so on press we pick the candidate that actually lies inside the pressed element
+		-- and keep the difference as a calibration offset
+		local GuiService = game:GetService("GuiService")
+		local dragFn
+		local calib = Vector2.new(0, 0)
+
+		local function inside(pos, hit)
+			local ap, as = hit.AbsolutePosition, hit.AbsoluteSize
+			return pos.X >= ap.X - 1 and pos.X <= ap.X + as.X + 1 and pos.Y >= ap.Y - 1 and pos.Y <= ap.Y + as.Y + 1
+		end
+
+		local function calibrate(input, hit)
+			local base = UserInputService:GetMouseLocation()
+			local inset = Vector2.new(0, 0)
+			pcall(function() inset = GuiService:GetGuiInset() end)
+			local ip = Vector2.new(input.Position.X, input.Position.Y)
+			local candidates = {base, ip, ip + inset, base - inset}
+			calib = Vector2.new(0, 0)
+			for _, c in ipairs(candidates) do
+				if inside(c, hit) then
+					calib = c - base
+					return
+				end
+			end
+		end
+
+		local function applyDrag()
+			if dragFn then
+				dragFn(UserInputService:GetMouseLocation() + calib)
+			end
+		end
+
+		local function isPress(input)
+			return input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch
+		end
+
+		-- fn(mousePosition) runs on press and on every move until release
+		local function bindDrag(hit, fn)
+			hit.InputBegan:Connect(function(input)
+				-- locked while "Enabled" is off
+				if isPress(input) and master then
+					dragFn = fn
+					calibrate(input, hit)
+					applyDrag()
+				end
+			end)
+		end
+
+		local moveConn = UserInputService.InputChanged:Connect(function(input)
+			if dragFn and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+				applyDrag()
+			end
+		end)
+		local endConn = UserInputService.InputEnded:Connect(function(input)
+			if isPress(input) then
+				dragFn = nil
+			end
+		end)
+
+		-- ====================================================
+		-- Visuals page: card 1 (Enabled / checks / distance) + card 2 (features)
+		-- ====================================================
 		local CARD1_H = 191
 		local CARD_GAP = 10
+		local FEAT_H = #FEATURES * 45 - 1
 
 		local card = Instance.new("Frame")
 		card.Name = "VisualsCard"
@@ -310,15 +475,22 @@ return function(lib)
 		addCorner(card)
 		addStroke(card, CARD_STROKE)
 
-		local boxCard = Instance.new("Frame")
-		boxCard.Name = "BoxEspCard"
-		boxCard.Position = UDim2.fromOffset(20, 66 + CARD1_H + CARD_GAP)
-		boxCard.Size = UDim2.new(1, -40, 0, ROW_H)
-		boxCard.BackgroundColor3 = CARD_BG
-		boxCard.BorderSizePixel = 0
-		boxCard.Parent = page
-		addCorner(boxCard)
-		addStroke(boxCard, CARD_STROKE)
+		local featCard = Instance.new("Frame")
+		featCard.Name = "EspFeaturesCard"
+		featCard.Position = UDim2.fromOffset(20, 66 + CARD1_H + CARD_GAP)
+		featCard.Size = UDim2.new(1, -40, 0, FEAT_H)
+		featCard.BackgroundColor3 = CARD_BG
+		featCard.BorderSizePixel = 0
+		featCard.Parent = page
+		addCorner(featCard)
+		addStroke(featCard, CARD_STROKE)
+
+		-- if the page can scroll, make sure the second card fits
+		if page:IsA("ScrollingFrame") then
+			pcall(function()
+				page.CanvasSize = UDim2.fromOffset(0, 66 + CARD1_H + CARD_GAP + FEAT_H + 20)
+			end)
+		end
 
 		local function addRow(y, height, parent)
 			local f = Instance.new("Frame")
@@ -329,13 +501,13 @@ return function(lib)
 			return f
 		end
 
-		local function addSeparator(y)
+		local function addSeparator(y, parent)
 			local f = Instance.new("Frame")
 			f.BackgroundColor3 = CARD_STROKE
 			f.BorderSizePixel = 0
 			f.Position = UDim2.fromOffset(12, y)
 			f.Size = UDim2.new(1, -24, 0, 1)
-			f.Parent = card
+			f.Parent = parent or card
 		end
 
 		-- y == nil -> label is vertically centered across the whole row
@@ -345,9 +517,9 @@ return function(lib)
 			l.BackgroundTransparency = 1
 			l.Position = UDim2.fromOffset(16, y or 0)
 			if y then
-				l.Size = UDim2.new(0.6, 0, 0, 18)
+				l.Size = UDim2.new(0.5, 0, 0, 18)
 			else
-				l.Size = UDim2.new(0.6, 0, 1, 0)
+				l.Size = UDim2.new(0.5, 0, 1, 0)
 			end
 			l.Font = Enum.Font.GothamMedium
 			l.Text = text
@@ -357,12 +529,6 @@ return function(lib)
 			l.Parent = parent
 			return l
 		end
-
-		local ON_TRACK = Color3.fromRGB(225, 225, 232)
-		local OFF_TRACK = Color3.fromRGB(44, 44, 50)
-		local ON_KNOB = Color3.fromRGB(22, 22, 25)
-		local OFF_KNOB = Color3.fromRGB(140, 140, 146)
-		local LOCKED_T = 0.6 -- transparency of a locked control
 
 		-- switch on the right edge of a row; onChange(on) runs on every change
 		-- gated = true -> the switch ignores clicks while "Enabled" (master) is off
@@ -432,6 +598,58 @@ return function(lib)
 			return obj
 		end
 
+		-- small "Settings" button that sits left of a feature switch
+		local function makeSettingsButton(parent, onClick)
+			local btn = Instance.new("TextButton")
+			btn.AnchorPoint = Vector2.new(1, 0.5)
+			btn.Position = UDim2.new(1, -70, 0.5, 0)
+			btn.Size = UDim2.fromOffset(62, 24)
+			btn.BackgroundColor3 = Color3.fromRGB(36, 36, 41)
+			btn.BorderSizePixel = 0
+			btn.AutoButtonColor = false
+			btn.Font = Enum.Font.GothamMedium
+			btn.Text = "Settings"
+			btn.TextColor3 = TEXT_SOFT
+			btn.TextSize = 12
+			btn.Parent = parent
+			addCorner(btn, 6)
+			local stroke = addStroke(btn, FIELD_STROKE)
+
+			local locked, active = false, false
+			local function strokeColor()
+				return active and Color3.fromRGB(120, 120, 130) or FIELD_STROKE
+			end
+
+			btn.MouseEnter:Connect(function()
+				if not locked and not active then
+					TweenService:Create(stroke, fadeInfo, {Color = Color3.fromRGB(90, 90, 100)}):Play()
+				end
+			end)
+			btn.MouseLeave:Connect(function()
+				TweenService:Create(stroke, fadeInfo, {Color = strokeColor()}):Play()
+			end)
+			btn.MouseButton1Click:Connect(function()
+				if not master then
+					return
+				end
+				onClick()
+			end)
+
+			local obj = {}
+			function obj.SetActive(value)
+				active = value
+				TweenService:Create(stroke, fadeInfo, {Color = strokeColor()}):Play()
+				TweenService:Create(btn, fadeInfo, {TextColor3 = value and TEXT_MAIN or TEXT_SOFT}):Play()
+			end
+			function obj.SetLocked(value)
+				locked = value
+				local t = value and LOCKED_T or 0
+				TweenService:Create(btn, fadeInfo, {BackgroundTransparency = t, TextTransparency = t}):Play()
+				TweenService:Create(stroke, fadeInfo, {Transparency = t}):Play()
+			end
+			return obj
+		end
+
 		-- card 1 rows
 		local masterRow = addRow(0, ROW_H)
 		addRowLabel(masterRow, "Enabled")
@@ -448,22 +666,36 @@ return function(lib)
 		local distRow = addRow(135, SLIDER_H)
 		addRowLabel(distRow, "Render distance", 6)
 
-		-- card 2 row
-		local boxRow = addRow(0, ROW_H, boxCard)
-		addRowLabel(boxRow, "Box Esp")
-
-		local masterSwitch = makeSwitch(masterRow, function(on)
-			master = on
+		local masterSwitch = makeSwitch(masterRow, function(isOn)
+			master = isOn
 		end, false)
-		local teamSwitch = makeSwitch(teamRow, function(on)
-			teamCheck = on
+		local teamSwitch = makeSwitch(teamRow, function(isOn)
+			teamCheck = isOn
 		end, true)
-		local visSwitch = makeSwitch(visRow, function(on)
-			visCheck = on
+		local visSwitch = makeSwitch(visRow, function(isOn)
+			visCheck = isOn
 		end, true)
-		local boxSwitch = makeSwitch(boxRow, function(on)
-			enabled = on
-		end, true)
+
+		-- card 2 rows: one per feature (switch + settings button)
+		local featSwitch, featBtn = {}, {}
+		for i, key in ipairs(FEATURES) do
+			local row = addRow((i - 1) * 45, ROW_H, featCard)
+			addRowLabel(row, LABELS[key])
+			featSwitch[key] = makeSwitch(row, function(isOn)
+				feat[key] = isOn
+				if isOn then
+					selected = key
+				elseif selected == key then
+					selected = nil
+				end
+			end, true)
+			featBtn[key] = makeSettingsButton(row, function()
+				selected = (selected == key) and nil or key
+			end)
+			if i < #FEATURES then
+				addSeparator(i * 45 - 1, featCard)
+			end
+		end
 
 		-- ---------- render distance slider ----------
 		local distValue = Instance.new("TextLabel")
@@ -519,6 +751,14 @@ return function(lib)
 		distHit.ZIndex = 3
 		distHit.Parent = distRow
 
+		bindDrag(distHit, function(m)
+			-- the hit area is a little wider than the track, so measure on the track itself
+			local tp, ts = distTrack.AbsolutePosition, distTrack.AbsoluteSize
+			local a = math.clamp((m.X - tp.X) / ts.X, 0, 1)
+			local value = DIST_MIN + a * (DIST_MAX - DIST_MIN)
+			setDistance(math.floor(value / DIST_STEP + 0.5) * DIST_STEP)
+		end)
+
 		-- ---------- locking: everything except "Enabled" fades and ignores input while master is off ----------
 		local lastLocked
 		local function refreshLocks()
@@ -529,7 +769,10 @@ return function(lib)
 			lastLocked = locked
 			teamSwitch.SetLocked(locked)
 			visSwitch.SetLocked(locked)
-			boxSwitch.SetLocked(locked)
+			for _, key in ipairs(FEATURES) do
+				featSwitch[key].SetLocked(locked)
+				featBtn[key].SetLocked(locked)
+			end
 			local t = locked and LOCKED_T or 0
 			TweenService:Create(distTrack, fadeInfo, {BackgroundTransparency = t}):Play()
 			TweenService:Create(distFill, fadeInfo, {BackgroundTransparency = t}):Play()
@@ -539,20 +782,15 @@ return function(lib)
 		refreshLocks()
 
 		-- ====================================================
-		-- settings window (connected under the main window)
+		-- settings window (connected under the main window, one panel per feature)
 		-- ====================================================
-		local SET_H, SET_GAP = 150, 6
-		local PANEL_BG = Color3.fromRGB(22, 22, 25)
-		local PANEL_STROKE = Color3.fromRGB(42, 42, 47)
-		local FIELD_STROKE = Color3.fromRGB(46, 46, 51)
-		local TEXT_DIM = Color3.fromRGB(110, 110, 116)
-		local TEXT_SOFT = Color3.fromRGB(190, 190, 196)
+		local SET_GAP = 6
 
 		local settings = Instance.new("Frame")
-		settings.Name = "BoxEspSettings"
+		settings.Name = "EspSettings"
 		settings.AnchorPoint = Vector2.new(0.5, 0.5)
-		settings.Size = UDim2.new(1, 0, 0, SET_H)
-		settings.Position = UDim2.new(0.5, 0, 1, SET_GAP + SET_H / 2)
+		settings.Size = UDim2.new(1, 0, 0, 150)
+		settings.Position = UDim2.new(0.5, 0, 1, SET_GAP + 75)
 		settings.BackgroundColor3 = PANEL_BG
 		settings.BorderSizePixel = 0
 		settings.Active = true
@@ -565,7 +803,7 @@ return function(lib)
 		settingsScale.Scale = 0.92
 		settingsScale.Parent = settings
 
-		local function smallLabel(text, x, y)
+		local function smallLabel(parent, text, x, y)
 			local l = Instance.new("TextLabel")
 			l.BackgroundTransparency = 1
 			l.Position = UDim2.fromOffset(x, y)
@@ -575,375 +813,447 @@ return function(lib)
 			l.TextColor3 = TEXT_DIM
 			l.TextSize = 11
 			l.TextXAlignment = Enum.TextXAlignment.Left
-			l.Parent = settings
+			l.Parent = parent
 			return l
 		end
 
-		smallLabel("BOX ESP", 14, 10)
-		local sep = Instance.new("Frame")
-		sep.BackgroundColor3 = Color3.fromRGB(38, 38, 42)
-		sep.BorderSizePixel = 0
-		sep.Position = UDim2.fromOffset(12, 32)
-		sep.Size = UDim2.new(1, -24, 0, 1)
-		sep.Parent = settings
-
-		-- ---------- color picker: saturation/value square + hue bar ----------
-		local svFrame = Instance.new("Frame")
-		svFrame.Name = "SV"
-		svFrame.Position = UDim2.fromOffset(14, 44)
-		svFrame.Size = UDim2.fromOffset(150, 92)
-		svFrame.BackgroundColor3 = Color3.fromHSV(h, 1, 1)
-		svFrame.BorderSizePixel = 0
-		svFrame.Parent = settings
-		addCorner(svFrame, 4)
-		addStroke(svFrame, FIELD_STROKE)
-
-		local white = Instance.new("Frame")
-		white.Size = UDim2.fromScale(1, 1)
-		white.BackgroundColor3 = Color3.new(1, 1, 1)
-		white.BorderSizePixel = 0
-		white.Parent = svFrame
-		addCorner(white, 4)
-		local whiteGradient = Instance.new("UIGradient")
-		whiteGradient.Transparency = NumberSequence.new({
-			NumberSequenceKeypoint.new(0, 0),
-			NumberSequenceKeypoint.new(1, 1),
-		})
-		whiteGradient.Parent = white
-
-		local black = Instance.new("Frame")
-		black.Size = UDim2.fromScale(1, 1)
-		black.BackgroundColor3 = Color3.new(0, 0, 0)
-		black.BorderSizePixel = 0
-		black.Parent = svFrame
-		addCorner(black, 4)
-		local blackGradient = Instance.new("UIGradient")
-		blackGradient.Rotation = 90
-		blackGradient.Transparency = NumberSequence.new({
-			NumberSequenceKeypoint.new(0, 1),
-			NumberSequenceKeypoint.new(1, 0),
-		})
-		blackGradient.Parent = black
-
-		local svCursor = Instance.new("Frame")
-		svCursor.AnchorPoint = Vector2.new(0.5, 0.5)
-		svCursor.Size = UDim2.fromOffset(10, 10)
-		svCursor.BackgroundTransparency = 1
-		svCursor.BorderSizePixel = 0
-		svCursor.ZIndex = 4
-		svCursor.Parent = svFrame
-		addCorner(svCursor, 1000)
-		local svCursorStroke = addStroke(svCursor, Color3.new(1, 1, 1))
-		svCursorStroke.Thickness = 2
-
-		local svHit = Instance.new("TextButton")
-		svHit.Size = UDim2.fromScale(1, 1)
-		svHit.BackgroundTransparency = 1
-		svHit.AutoButtonColor = false
-		svHit.Text = ""
-		svHit.ZIndex = 5
-		svHit.Parent = svFrame
-
-		local hueFrame = Instance.new("Frame")
-		hueFrame.Name = "Hue"
-		hueFrame.Position = UDim2.fromOffset(172, 44)
-		hueFrame.Size = UDim2.fromOffset(14, 92)
-		hueFrame.BackgroundColor3 = Color3.new(1, 1, 1)
-		hueFrame.BorderSizePixel = 0
-		hueFrame.Parent = settings
-		addCorner(hueFrame, 4)
-		addStroke(hueFrame, FIELD_STROKE)
-
-		local hueKeys = {}
-		for i = 0, 6 do
-			table.insert(hueKeys, ColorSequenceKeypoint.new(i / 6, Color3.fromHSV(i / 6 >= 1 and 0 or i / 6, 1, 1)))
+		local panels = {} -- [feature] = {frame = Frame, height = number}
+		local function newPanel(key, height, title)
+			local f = Instance.new("Frame")
+			f.Name = key
+			f.BackgroundTransparency = 1
+			f.Size = UDim2.fromScale(1, 1)
+			f.Visible = false
+			f.Parent = settings
+			smallLabel(f, title, 14, 10)
+			local sep = Instance.new("Frame")
+			sep.BackgroundColor3 = Color3.fromRGB(38, 38, 42)
+			sep.BorderSizePixel = 0
+			sep.Position = UDim2.fromOffset(12, 32)
+			sep.Size = UDim2.new(1, -24, 0, 1)
+			sep.Parent = f
+			panels[key] = {frame = f, height = height}
+			return f
 		end
-		local hueGradient = Instance.new("UIGradient")
-		hueGradient.Rotation = 90
-		hueGradient.Color = ColorSequence.new(hueKeys)
-		hueGradient.Parent = hueFrame
 
-		local hueCursor = Instance.new("Frame")
-		hueCursor.AnchorPoint = Vector2.new(0.5, 0.5)
-		hueCursor.Size = UDim2.new(1, 6, 0, 4)
-		hueCursor.BackgroundColor3 = Color3.new(1, 1, 1)
-		hueCursor.BorderSizePixel = 0
-		hueCursor.ZIndex = 4
-		hueCursor.Parent = hueFrame
-		addCorner(hueCursor, 2)
-		addStroke(hueCursor, Color3.fromRGB(20, 20, 23))
+		-- row of exclusive buttons; onPick(name) runs on every change (click or .Set)
+		local function makeChoice(parent, x, y, names, initial, onPick)
+			local row = Instance.new("Frame")
+			row.BackgroundTransparency = 1
+			row.Position = UDim2.fromOffset(x, y)
+			row.Size = UDim2.new(1, -(x + 14), 0, 26)
+			row.Parent = parent
 
-		local hueHit = Instance.new("TextButton")
-		hueHit.Size = UDim2.fromScale(1, 1)
-		hueHit.BackgroundTransparency = 1
-		hueHit.AutoButtonColor = false
-		hueHit.Text = ""
-		hueHit.ZIndex = 5
-		hueHit.Parent = hueFrame
+			local layout = Instance.new("UIListLayout")
+			layout.FillDirection = Enum.FillDirection.Horizontal
+			layout.Padding = UDim.new(0, 6)
+			layout.SortOrder = Enum.SortOrder.LayoutOrder
+			layout.Parent = row
 
-		-- ---------- alpha (transparency) bar ----------
-		local alphaFrame = Instance.new("Frame")
-		alphaFrame.Name = "Alpha"
-		alphaFrame.Position = UDim2.fromOffset(194, 44)
-		alphaFrame.Size = UDim2.fromOffset(14, 92)
-		alphaFrame.BackgroundColor3 = Color3.fromRGB(52, 52, 58)
-		alphaFrame.BorderSizePixel = 0
-		alphaFrame.Parent = settings
-		addCorner(alphaFrame, 4)
-		addStroke(alphaFrame, FIELD_STROKE)
+			local n = #names
+			local buttons, strokes = {}, {}
+			local current = initial
+			local api = {buttons = buttons}
 
-		local alphaFill = Instance.new("Frame")
-		alphaFill.Size = UDim2.fromScale(1, 1)
-		alphaFill.BackgroundColor3 = color
-		alphaFill.BorderSizePixel = 0
-		alphaFill.Parent = alphaFrame
-		addCorner(alphaFill, 4)
-		local alphaGradient = Instance.new("UIGradient")
-		alphaGradient.Rotation = 90
-		alphaGradient.Transparency = NumberSequence.new({
-			NumberSequenceKeypoint.new(0, 0),
-			NumberSequenceKeypoint.new(1, 0.95),
-		})
-		alphaGradient.Parent = alphaFill
-
-		local alphaCursor = Instance.new("Frame")
-		alphaCursor.AnchorPoint = Vector2.new(0.5, 0.5)
-		alphaCursor.Size = UDim2.new(1, 6, 0, 4)
-		alphaCursor.BackgroundColor3 = Color3.new(1, 1, 1)
-		alphaCursor.BorderSizePixel = 0
-		alphaCursor.ZIndex = 4
-		alphaCursor.Parent = alphaFrame
-		addCorner(alphaCursor, 2)
-		addStroke(alphaCursor, Color3.fromRGB(20, 20, 23))
-
-		local alphaHit = Instance.new("TextButton")
-		alphaHit.Size = UDim2.fromScale(1, 1)
-		alphaHit.BackgroundTransparency = 1
-		alphaHit.AutoButtonColor = false
-		alphaHit.Text = ""
-		alphaHit.ZIndex = 5
-		alphaHit.Parent = alphaFrame
-
-		-- ---------- style buttons ----------
-		smallLabel("STYLE", 226, 42)
-
-		local styleRow = Instance.new("Frame")
-		styleRow.BackgroundTransparency = 1
-		styleRow.Position = UDim2.fromOffset(226, 60)
-		styleRow.Size = UDim2.new(1, -240, 0, 26)
-		styleRow.Parent = settings
-
-		local styleLayout = Instance.new("UIListLayout")
-		styleLayout.FillDirection = Enum.FillDirection.Horizontal
-		styleLayout.Padding = UDim.new(0, 6)
-		styleLayout.SortOrder = Enum.SortOrder.LayoutOrder
-		styleLayout.Parent = styleRow
-
-		local STYLES = {"Full", "Corners", "3D"}
-		local styleButtons, styleStrokes = {}, {}
-
-		local function refreshStyleButtons(animate)
-			local info = animate and fadeInfo or TweenInfo.new(0)
-			for name, btn in pairs(styleButtons) do
-				local selected = name == style
-				TweenService:Create(btn, info, {
-					BackgroundColor3 = selected and Color3.fromRGB(48, 48, 55) or Color3.fromRGB(28, 28, 32),
-					TextColor3 = selected and TEXT_MAIN or TEXT_SOFT,
-				}):Play()
-				TweenService:Create(styleStrokes[name], info, {
-					Color = selected and Color3.fromRGB(120, 120, 130) or FIELD_STROKE,
-				}):Play()
+			local function refresh(animate)
+				local info = animate and fadeInfo or TweenInfo.new(0)
+				for name, btn in pairs(buttons) do
+					local sel = name == current
+					TweenService:Create(btn, info, {
+						BackgroundColor3 = sel and Color3.fromRGB(48, 48, 55) or Color3.fromRGB(28, 28, 32),
+						TextColor3 = sel and TEXT_MAIN or TEXT_SOFT,
+					}):Play()
+					TweenService:Create(strokes[name], info, {
+						Color = sel and Color3.fromRGB(120, 120, 130) or FIELD_STROKE,
+					}):Play()
+				end
 			end
-		end
 
-		for i, name in ipairs(STYLES) do
-			local btn = Instance.new("TextButton")
-			btn.Name = name
-			btn.LayoutOrder = i
-			btn.Size = UDim2.new(1 / 3, -4, 1, 0)
-			btn.BackgroundColor3 = Color3.fromRGB(28, 28, 32)
-			btn.BorderSizePixel = 0
-			btn.AutoButtonColor = false
-			btn.Font = Enum.Font.GothamMedium
-			btn.Text = name
-			btn.TextColor3 = TEXT_SOFT
-			btn.TextSize = 13
-			btn.Parent = styleRow
-			addCorner(btn)
-			styleStrokes[name] = addStroke(btn, FIELD_STROKE)
-			styleButtons[name] = btn
-
-			btn.MouseButton1Click:Connect(function()
-				style = name
-				refreshStyleButtons(true)
-			end)
-		end
-		refreshStyleButtons(false)
-
-		-- ---------- color preview + hex ----------
-		smallLabel("COLOR", 226, 94)
-
-		local colorRow = Instance.new("Frame")
-		colorRow.BackgroundTransparency = 1
-		colorRow.Position = UDim2.fromOffset(226, 110)
-		colorRow.Size = UDim2.new(1, -240, 0, 26)
-		colorRow.Parent = settings
-
-		local swatch = Instance.new("Frame")
-		swatch.Size = UDim2.fromOffset(26, 26)
-		swatch.BackgroundColor3 = color
-		swatch.BorderSizePixel = 0
-		swatch.Parent = colorRow
-		addCorner(swatch)
-		addStroke(swatch, FIELD_STROKE)
-
-		local hexBox = Instance.new("TextBox")
-		hexBox.Position = UDim2.fromOffset(34, 0)
-		hexBox.Size = UDim2.new(1, -34, 1, 0)
-		hexBox.BackgroundColor3 = Color3.fromRGB(28, 28, 32)
-		hexBox.BorderSizePixel = 0
-		hexBox.ClearTextOnFocus = false
-		hexBox.Font = Enum.Font.GothamMedium
-		hexBox.Text = ""
-		hexBox.PlaceholderText = "#RRGGBB"
-		hexBox.PlaceholderColor3 = Color3.fromRGB(95, 95, 101)
-		hexBox.TextColor3 = TEXT_MAIN
-		hexBox.TextSize = 13
-		hexBox.TextXAlignment = Enum.TextXAlignment.Left
-		hexBox.Parent = colorRow
-		addCorner(hexBox)
-		local hexStroke = addStroke(hexBox, FIELD_STROKE)
-		local hexPad = Instance.new("UIPadding")
-		hexPad.PaddingLeft = UDim.new(0, 10)
-		hexPad.Parent = hexBox
-
-		local hexFocused = false
-
-		local function toHex(c)
-			return string.format("#%02X%02X%02X", math.floor(c.R * 255 + 0.5), math.floor(c.G * 255 + 0.5), math.floor(c.B * 255 + 0.5))
-		end
-
-		local function refreshColor()
-			color = Color3.fromHSV(h, s, v)
-			svFrame.BackgroundColor3 = Color3.fromHSV(h, 1, 1)
-			svCursor.Position = UDim2.fromScale(s, 1 - v)
-			hueCursor.Position = UDim2.fromScale(0.5, h)
-			swatch.BackgroundColor3 = color
-			swatch.BackgroundTransparency = 1 - alpha
-			alphaFill.BackgroundColor3 = color
-			alphaCursor.Position = UDim2.fromScale(0.5, 1 - alpha)
-			if not hexFocused then
-				hexBox.Text = toHex(color)
-			end
-			styleVersion = styleVersion + 1
-		end
-		refreshColor()
-
-		hexBox.Focused:Connect(function()
-			hexFocused = true
-			TweenService:Create(hexStroke, fadeInfo, {Color = Color3.fromRGB(95, 95, 104)}):Play()
-		end)
-		hexBox.FocusLost:Connect(function()
-			hexFocused = false
-			TweenService:Create(hexStroke, fadeInfo, {Color = FIELD_STROKE}):Play()
-			local r, g, b = hexBox.Text:match("^#?(%x%x)(%x%x)(%x%x)$")
-			if r then
-				local c = Color3.fromRGB(tonumber(r, 16), tonumber(g, 16), tonumber(b, 16))
-				h, s, v = rgbToHsv(c)
-				h = math.min(h, 0.999)
-				refreshColor()
-			end
-			hexBox.Text = toHex(color)
-		end)
-
-		-- ---------- dragging the picker + distance slider ----------
-		-- the pointer coordinate space differs between executors/GUI-inset settings,
-		-- so on press we pick the candidate that actually lies inside the pressed element
-		-- and keep the difference as a calibration offset
-		local GuiService = game:GetService("GuiService")
-		local dragTarget
-		local dragHit
-		local calib = Vector2.new(0, 0)
-
-		local function inside(pos, hit)
-			local ap, as = hit.AbsolutePosition, hit.AbsoluteSize
-			return pos.X >= ap.X - 1 and pos.X <= ap.X + as.X + 1 and pos.Y >= ap.Y - 1 and pos.Y <= ap.Y + as.Y + 1
-		end
-
-		local function calibrate(input, hit)
-			local base = UserInputService:GetMouseLocation()
-			local inset = Vector2.new(0, 0)
-			pcall(function() inset = GuiService:GetGuiInset() end)
-			local ip = Vector2.new(input.Position.X, input.Position.Y)
-			local candidates = {base, ip, ip + inset, base - inset}
-			calib = Vector2.new(0, 0)
-			for _, c in ipairs(candidates) do
-				if inside(c, hit) then
-					calib = c - base
+			function api.Set(name)
+				if not buttons[name] then
 					return
 				end
+				current = name
+				refresh(true)
+				onPick(name)
 			end
+
+			for i, name in ipairs(names) do
+				local btn = Instance.new("TextButton")
+				btn.Name = name
+				btn.LayoutOrder = i
+				btn.Size = UDim2.new(1 / n, -6 * (n - 1) / n, 1, 0)
+				btn.BackgroundColor3 = Color3.fromRGB(28, 28, 32)
+				btn.BorderSizePixel = 0
+				btn.AutoButtonColor = false
+				btn.Font = Enum.Font.GothamMedium
+				btn.Text = name
+				btn.TextColor3 = TEXT_SOFT
+				btn.TextSize = 13
+				btn.Parent = row
+				addCorner(btn)
+				strokes[name] = addStroke(btn, FIELD_STROKE)
+				buttons[name] = btn
+				btn.MouseButton1Click:Connect(function()
+					api.Set(name)
+				end)
+			end
+			refresh(false)
+			return api
 		end
 
-		local function applyDrag()
-			if not dragTarget then
-				return
-			end
-			local m = UserInputService:GetMouseLocation() + calib
-			local ap, as = dragHit.AbsolutePosition, dragHit.AbsoluteSize
-			if dragTarget == "sv" then
-				s = math.clamp((m.X - ap.X) / as.X, 0, 1)
-				v = 1 - math.clamp((m.Y - ap.Y) / as.Y, 0, 1)
-				refreshColor()
-			elseif dragTarget == "hue" then
-				h = math.clamp((m.Y - ap.Y) / as.Y, 0, 0.999)
-				refreshColor()
-			elseif dragTarget == "dist" then
-				-- the hit area is a little wider than the track, so measure on the track itself
-				local tp, ts = distTrack.AbsolutePosition, distTrack.AbsoluteSize
-				local a = math.clamp((m.X - tp.X) / ts.X, 0, 1)
-				local value = DIST_MIN + a * (DIST_MAX - DIST_MIN)
-				setDistance(math.floor(value / DIST_STEP + 0.5) * DIST_STEP)
-			else
-				alpha = 1 - math.clamp((m.Y - ap.Y) / as.Y, 0, 1)
-				refreshColor()
-			end
-		end
+		-- color picker: saturation/value square + hue bar (+ alpha bar) + swatch + hex box
+		-- edits whichever slot is bound with .Bind(slot); onChange() runs after every edit
+		local function makePicker(parent, withAlpha, pickH, hexX, hexY, onChange)
+			local P = {slot = nil}
+			local hexFocused = false
 
-		local function isPress(input)
-			return input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch
-		end
+			local svFrame = Instance.new("Frame")
+			svFrame.Name = "SV"
+			svFrame.Position = UDim2.fromOffset(14, 44)
+			svFrame.Size = UDim2.fromOffset(150, pickH)
+			svFrame.BackgroundColor3 = Color3.fromHSV(0, 1, 1)
+			svFrame.BorderSizePixel = 0
+			svFrame.Parent = parent
+			addCorner(svFrame, 4)
+			addStroke(svFrame, FIELD_STROKE)
 
-		local function bindDrag(hit, target)
-			hit.InputBegan:Connect(function(input)
-				-- locked while "Enabled" is off
-				if isPress(input) and master then
-					dragTarget = target
-					dragHit = hit
-					calibrate(input, hit)
-					applyDrag()
+			local white = Instance.new("Frame")
+			white.Size = UDim2.fromScale(1, 1)
+			white.BackgroundColor3 = Color3.new(1, 1, 1)
+			white.BorderSizePixel = 0
+			white.Parent = svFrame
+			addCorner(white, 4)
+			local whiteGradient = Instance.new("UIGradient")
+			whiteGradient.Transparency = NumberSequence.new({
+				NumberSequenceKeypoint.new(0, 0),
+				NumberSequenceKeypoint.new(1, 1),
+			})
+			whiteGradient.Parent = white
+
+			local black = Instance.new("Frame")
+			black.Size = UDim2.fromScale(1, 1)
+			black.BackgroundColor3 = Color3.new(0, 0, 0)
+			black.BorderSizePixel = 0
+			black.Parent = svFrame
+			addCorner(black, 4)
+			local blackGradient = Instance.new("UIGradient")
+			blackGradient.Rotation = 90
+			blackGradient.Transparency = NumberSequence.new({
+				NumberSequenceKeypoint.new(0, 1),
+				NumberSequenceKeypoint.new(1, 0),
+			})
+			blackGradient.Parent = black
+
+			local svCursor = Instance.new("Frame")
+			svCursor.AnchorPoint = Vector2.new(0.5, 0.5)
+			svCursor.Size = UDim2.fromOffset(10, 10)
+			svCursor.BackgroundTransparency = 1
+			svCursor.BorderSizePixel = 0
+			svCursor.ZIndex = 4
+			svCursor.Parent = svFrame
+			addCorner(svCursor, 1000)
+			local svCursorStroke = addStroke(svCursor, Color3.new(1, 1, 1))
+			svCursorStroke.Thickness = 2
+
+			local svHit = Instance.new("TextButton")
+			svHit.Size = UDim2.fromScale(1, 1)
+			svHit.BackgroundTransparency = 1
+			svHit.AutoButtonColor = false
+			svHit.Text = ""
+			svHit.ZIndex = 5
+			svHit.Parent = svFrame
+
+			local hueFrame = Instance.new("Frame")
+			hueFrame.Name = "Hue"
+			hueFrame.Position = UDim2.fromOffset(172, 44)
+			hueFrame.Size = UDim2.fromOffset(14, pickH)
+			hueFrame.BackgroundColor3 = Color3.new(1, 1, 1)
+			hueFrame.BorderSizePixel = 0
+			hueFrame.Parent = parent
+			addCorner(hueFrame, 4)
+			addStroke(hueFrame, FIELD_STROKE)
+
+			local hueKeys = {}
+			for i = 0, 6 do
+				table.insert(hueKeys, ColorSequenceKeypoint.new(i / 6, Color3.fromHSV(i / 6 >= 1 and 0 or i / 6, 1, 1)))
+			end
+			local hueGradient = Instance.new("UIGradient")
+			hueGradient.Rotation = 90
+			hueGradient.Color = ColorSequence.new(hueKeys)
+			hueGradient.Parent = hueFrame
+
+			local hueCursor = Instance.new("Frame")
+			hueCursor.AnchorPoint = Vector2.new(0.5, 0.5)
+			hueCursor.Size = UDim2.new(1, 6, 0, 4)
+			hueCursor.BackgroundColor3 = Color3.new(1, 1, 1)
+			hueCursor.BorderSizePixel = 0
+			hueCursor.ZIndex = 4
+			hueCursor.Parent = hueFrame
+			addCorner(hueCursor, 2)
+			addStroke(hueCursor, Color3.fromRGB(20, 20, 23))
+
+			local hueHit = Instance.new("TextButton")
+			hueHit.Size = UDim2.fromScale(1, 1)
+			hueHit.BackgroundTransparency = 1
+			hueHit.AutoButtonColor = false
+			hueHit.Text = ""
+			hueHit.ZIndex = 5
+			hueHit.Parent = hueFrame
+
+			-- alpha (transparency) bar
+			local alphaFill, alphaCursor, alphaHit
+			if withAlpha then
+				local alphaFrame = Instance.new("Frame")
+				alphaFrame.Name = "Alpha"
+				alphaFrame.Position = UDim2.fromOffset(194, 44)
+				alphaFrame.Size = UDim2.fromOffset(14, pickH)
+				alphaFrame.BackgroundColor3 = Color3.fromRGB(52, 52, 58)
+				alphaFrame.BorderSizePixel = 0
+				alphaFrame.Parent = parent
+				addCorner(alphaFrame, 4)
+				addStroke(alphaFrame, FIELD_STROKE)
+
+				alphaFill = Instance.new("Frame")
+				alphaFill.Size = UDim2.fromScale(1, 1)
+				alphaFill.BackgroundColor3 = Color3.new(1, 1, 1)
+				alphaFill.BorderSizePixel = 0
+				alphaFill.Parent = alphaFrame
+				addCorner(alphaFill, 4)
+				local alphaGradient = Instance.new("UIGradient")
+				alphaGradient.Rotation = 90
+				alphaGradient.Transparency = NumberSequence.new({
+					NumberSequenceKeypoint.new(0, 0),
+					NumberSequenceKeypoint.new(1, 0.95),
+				})
+				alphaGradient.Parent = alphaFill
+
+				alphaCursor = Instance.new("Frame")
+				alphaCursor.AnchorPoint = Vector2.new(0.5, 0.5)
+				alphaCursor.Size = UDim2.new(1, 6, 0, 4)
+				alphaCursor.BackgroundColor3 = Color3.new(1, 1, 1)
+				alphaCursor.BorderSizePixel = 0
+				alphaCursor.ZIndex = 4
+				alphaCursor.Parent = alphaFrame
+				addCorner(alphaCursor, 2)
+				addStroke(alphaCursor, Color3.fromRGB(20, 20, 23))
+
+				alphaHit = Instance.new("TextButton")
+				alphaHit.Size = UDim2.fromScale(1, 1)
+				alphaHit.BackgroundTransparency = 1
+				alphaHit.AutoButtonColor = false
+				alphaHit.Text = ""
+				alphaHit.ZIndex = 5
+				alphaHit.Parent = alphaFrame
+			end
+
+			-- color preview + hex
+			local swatch = Instance.new("Frame")
+			swatch.Position = UDim2.fromOffset(hexX, hexY)
+			swatch.Size = UDim2.fromOffset(26, 26)
+			swatch.BackgroundColor3 = Color3.new(1, 1, 1)
+			swatch.BorderSizePixel = 0
+			swatch.Parent = parent
+			addCorner(swatch)
+			addStroke(swatch, FIELD_STROKE)
+
+			local hexBox = Instance.new("TextBox")
+			hexBox.Position = UDim2.fromOffset(hexX + 34, hexY)
+			hexBox.Size = UDim2.new(1, -(hexX + 34 + 14), 0, 26)
+			hexBox.BackgroundColor3 = Color3.fromRGB(28, 28, 32)
+			hexBox.BorderSizePixel = 0
+			hexBox.ClearTextOnFocus = false
+			hexBox.Font = Enum.Font.GothamMedium
+			hexBox.Text = ""
+			hexBox.PlaceholderText = "#RRGGBB"
+			hexBox.PlaceholderColor3 = Color3.fromRGB(95, 95, 101)
+			hexBox.TextColor3 = TEXT_MAIN
+			hexBox.TextSize = 13
+			hexBox.TextXAlignment = Enum.TextXAlignment.Left
+			hexBox.Parent = parent
+			addCorner(hexBox)
+			local hexStroke = addStroke(hexBox, FIELD_STROKE)
+			local hexPad = Instance.new("UIPadding")
+			hexPad.PaddingLeft = UDim.new(0, 10)
+			hexPad.Parent = hexBox
+
+			function P.Refresh()
+				local sl = P.slot
+				if not sl then
+					return
+				end
+				local c = colorOf(sl)
+				svFrame.BackgroundColor3 = Color3.fromHSV(sl.h, 1, 1)
+				svCursor.Position = UDim2.fromScale(sl.s, 1 - sl.v)
+				hueCursor.Position = UDim2.fromScale(0.5, sl.h)
+				swatch.BackgroundColor3 = c
+				swatch.BackgroundTransparency = withAlpha and (1 - sl.a) or 0
+				if alphaFill then
+					alphaFill.BackgroundColor3 = c
+					alphaCursor.Position = UDim2.fromScale(0.5, 1 - sl.a)
+				end
+				if not hexFocused then
+					hexBox.Text = toHex(c)
+				end
+			end
+
+			function P.Changed()
+				P.Refresh()
+				onChange()
+			end
+
+			function P.Bind(slot)
+				P.slot = slot
+				P.Refresh()
+			end
+
+			hexBox.Focused:Connect(function()
+				hexFocused = true
+				TweenService:Create(hexStroke, fadeInfo, {Color = Color3.fromRGB(95, 95, 104)}):Play()
+			end)
+			hexBox.FocusLost:Connect(function()
+				hexFocused = false
+				TweenService:Create(hexStroke, fadeInfo, {Color = FIELD_STROKE}):Play()
+				local r, g, b = hexBox.Text:match("^#?(%x%x)(%x%x)(%x%x)$")
+				if r and P.slot then
+					local hh, ss, vv = rgbToHsv(Color3.fromRGB(tonumber(r, 16), tonumber(g, 16), tonumber(b, 16)))
+					P.slot.h, P.slot.s, P.slot.v = math.min(hh, 0.999), ss, vv
+					onChange()
+				end
+				P.Refresh()
+				if P.slot then
+					hexBox.Text = toHex(colorOf(P.slot))
 				end
 			end)
+
+			bindDrag(svHit, function(m)
+				if not P.slot then
+					return
+				end
+				local ap, as = svHit.AbsolutePosition, svHit.AbsoluteSize
+				P.slot.s = math.clamp((m.X - ap.X) / as.X, 0, 1)
+				P.slot.v = 1 - math.clamp((m.Y - ap.Y) / as.Y, 0, 1)
+				P.Changed()
+			end)
+			bindDrag(hueHit, function(m)
+				if not P.slot then
+					return
+				end
+				local ap, as = hueHit.AbsolutePosition, hueHit.AbsoluteSize
+				P.slot.h = math.clamp((m.Y - ap.Y) / as.Y, 0, 0.999)
+				P.Changed()
+			end)
+			if alphaHit then
+				bindDrag(alphaHit, function(m)
+					if not P.slot then
+						return
+					end
+					local ap, as = alphaHit.AbsolutePosition, alphaHit.AbsoluteSize
+					P.slot.a = 1 - math.clamp((m.Y - ap.Y) / as.Y, 0, 1)
+					P.Changed()
+				end)
+			end
+
+			return P
 		end
-		bindDrag(svHit, "sv")
-		bindDrag(hueHit, "hue")
-		bindDrag(alphaHit, "alpha")
-		bindDrag(distHit, "dist")
-		local moveConn = UserInputService.InputChanged:Connect(function(input)
-			if dragTarget and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-				applyDrag()
-			end
+
+		local function noop() end
+
+		-- ---------- Box Esp panel ----------
+		local STYLES = {"Full", "Corners", "3D"}
+		local boxPanel = newPanel("Box", 150, "BOX ESP")
+		local boxPicker = makePicker(boxPanel, true, 92, 226, 110, noop)
+		boxPicker.Bind(slots.box)
+		smallLabel(boxPanel, "STYLE", 226, 42)
+		local styleChoice = makeChoice(boxPanel, 226, 60, STYLES, style, function(name)
+			style = name
 		end)
-		local endConn = UserInputService.InputEnded:Connect(function(input)
-			if isPress(input) then
-				dragTarget = nil
+		smallLabel(boxPanel, "COLOR", 226, 94)
+
+		-- ---------- Name Esp panel ----------
+		local NAME_SOURCES = {"Display", "Username", "Both"}
+		local namePanel = newPanel("Name", 190, "NAME ESP")
+		local namePicker = makePicker(namePanel, true, 132, 226, 154, noop)
+		namePicker.Bind(slots.name)
+		smallLabel(namePanel, "SOURCE", 226, 42)
+		local sourceChoice = makeChoice(namePanel, 226, 60, NAME_SOURCES, nameSource, function(name)
+			nameSource = name
+		end)
+		smallLabel(namePanel, "DISTANCE", 226, 90)
+		local nameDistChoice = makeChoice(namePanel, 226, 108, {"Off", "On"}, "Off", function(name)
+			nameDist = name == "On"
+		end)
+		smallLabel(namePanel, "COLOR", 226, 138)
+
+		-- ---------- Health bar panel ----------
+		local HP_STOPS = {Full = "hpFull", Mid = "hpMid", Low = "hpLow"}
+		local healthPanel = newPanel("Health", 180, "HEALTH BAR")
+		local hpDots = {}
+		local function refreshDots()
+			for name, dot in pairs(hpDots) do
+				dot.BackgroundColor3 = colorOf(slots[HP_STOPS[name]])
 			end
+		end
+		local healthPicker = makePicker(healthPanel, false, 122, 226, 142, refreshDots)
+		healthPicker.Bind(slots.hpFull)
+		smallLabel(healthPanel, "MODE", 226, 42)
+		local hpModeChoice = makeChoice(healthPanel, 226, 60, {"Solid", "Gradient"}, hpMode, function(name)
+			hpMode = name
+		end)
+		smallLabel(healthPanel, "COLORS  (FULL / MID / LOW)", 226, 90)
+		local hpStopChoice = makeChoice(healthPanel, 226, 108, {"Full", "Mid", "Low"}, "Full", function(name)
+			healthPicker.Bind(slots[HP_STOPS[name]])
+		end)
+		for name, btn in pairs(hpStopChoice.buttons) do
+			local dot = Instance.new("Frame")
+			dot.AnchorPoint = Vector2.new(0, 0.5)
+			dot.Position = UDim2.new(0, 8, 0.5, 0)
+			dot.Size = UDim2.fromOffset(10, 10)
+			dot.BorderSizePixel = 0
+			dot.Parent = btn
+			addCorner(dot, 3)
+			hpDots[name] = dot
+		end
+		refreshDots()
+
+		-- ---------- Skeleton panel ----------
+		local THICKNESSES = {Thin = 1, Normal = 1.5, Thick = 2.5}
+		local skelPanel = newPanel("Skeleton", 150, "SKELETON ESP")
+		local skelPicker = makePicker(skelPanel, true, 92, 226, 60, noop)
+		skelPicker.Bind(slots.skel)
+		smallLabel(skelPanel, "COLOR", 226, 42)
+		smallLabel(skelPanel, "THICKNESS", 226, 94)
+		local thickChoice = makeChoice(skelPanel, 226, 110, {"Thin", "Normal", "Thick"}, "Thin", function(name)
+			skelThick = THICKNESSES[name]
 		end)
 
-		-- ---------- show / hide the settings window ----------
+		local function refreshAllPickers()
+			boxPicker.Refresh()
+			namePicker.Refresh()
+			healthPicker.Refresh()
+			skelPicker.Refresh()
+			refreshDots()
+		end
+
+		-- ---------- show / hide / switch the settings window ----------
 		local settingsShown = false
+		local shownKey = nil
+		local curH = 150
+		local lastSelected = nil
+
 		local function updateSettings()
-			local wanted = master and enabled and page.Visible
+			local wanted = master and selected ~= nil and page.Visible
+
+			if wanted and selected ~= shownKey then
+				if shownKey then
+					panels[shownKey].frame.Visible = false
+				end
+				shownKey = selected
+				panels[shownKey].frame.Visible = true
+				curH = panels[shownKey].height
+				settings.Size = UDim2.new(1, 0, 0, curH)
+			end
+
 			if wanted ~= settingsShown then
 				settingsShown = wanted
 				if wanted then
@@ -960,21 +1270,100 @@ return function(lib)
 				end
 			end
 
+			if selected ~= lastSelected then
+				lastSelected = selected
+				for _, key in ipairs(FEATURES) do
+					featBtn[key].SetActive(key == selected)
+				end
+			end
+
 			-- sit under the window, or flip above it if the screen has no room
 			if settings.Visible then
 				local p, sz = win.frame.AbsolutePosition, win.frame.AbsoluteSize
-				local below = p.Y + sz.Y + SET_GAP + SET_H <= win.gui.AbsoluteSize.Y
+				local below = p.Y + sz.Y + SET_GAP + curH <= win.gui.AbsoluteSize.Y
 				settings.Position = below
-					and UDim2.new(0.5, 0, 1, SET_GAP + SET_H / 2)
-					or UDim2.new(0.5, 0, 0, -(SET_GAP + SET_H / 2))
+					and UDim2.new(0.5, 0, 1, SET_GAP + curH / 2)
+					or UDim2.new(0.5, 0, 0, -(SET_GAP + curH / 2))
 			end
 		end
 
 		-- ====================================================
-		-- preview on the 3D avatar render (GUI lines inside the viewport)
+		-- name / health helpers (shared by preview and real ESP)
+		-- ====================================================
+		local function nameText(player, dist)
+			local t
+			if nameSource == "Username" then
+				t = player.Name
+			elseif nameSource == "Both" then
+				t = (player.DisplayName ~= player.Name) and (player.DisplayName .. " (@" .. player.Name .. ")") or player.Name
+			else
+				t = player.DisplayName
+			end
+			if nameDist then
+				t = t .. " [" .. math.floor(dist + 0.5) .. "]"
+			end
+			return t
+		end
+
+		local function healthFrac(hum)
+			local mh = hum.MaxHealth
+			if mh <= 0 then
+				return 0
+			end
+			return math.clamp(hum.Health / mh, 0, 1)
+		end
+
+		-- t: 0 = low, 0.5 = mid, 1 = full
+		local function healthColor(t)
+			local lo, mid, hi = colorOf(slots.hpLow), colorOf(slots.hpMid), colorOf(slots.hpFull)
+			if t < 0.5 then
+				return lo:Lerp(mid, t * 2)
+			end
+			return mid:Lerp(hi, (t - 0.5) * 2)
+		end
+
+		-- rectangles of the health bar, filled from `bnd` (call computeBounds first)
+		local hpRects = {}
+		for i = 1, HP_SEGS do
+			hpRects[i] = {0, 0, 0, 0, Color3.new(1, 1, 1)}
+		end
+		local hpBg = {0, 0, 0, 0}
+
+		-- returns how many fill rectangles to draw; also fills hpBg
+		local function computeHealth(frac)
+			local top = math.floor(bnd.minY - PAD)
+			local bottom = math.floor(bnd.maxY + PAD)
+			local H = bottom - top
+			local w = HP_W
+			local x = math.floor(bnd.minX - PAD - 3 - w)
+			hpBg[1], hpBg[2], hpBg[3], hpBg[4] = x - 1, top - 1, w + 2, H + 2
+			if frac <= 0 then
+				return 0
+			end
+			if hpMode == "Solid" then
+				local r = hpRects[1]
+				r[1], r[2], r[3], r[4], r[5] = x, bottom - H * frac, w, H * frac, healthColor(frac)
+				return 1
+			end
+			local n = 0
+			for i = 0, HP_SEGS - 1 do
+				local f0, f1 = i / HP_SEGS, (i + 1) / HP_SEGS
+				if frac > f0 then
+					local topF = math.min(f1, frac)
+					n = n + 1
+					local r = hpRects[n]
+					r[1], r[2], r[3], r[4], r[5] = x, bottom - topF * H, w, (topF - f0) * H, healthColor((f0 + f1) / 2)
+				end
+			end
+			return n
+		end
+
+		-- ====================================================
+		-- preview on the 3D avatar render (GUI objects inside the viewport)
 		-- ====================================================
 		local previewViewport
-		local previewLines = {}
+		local prevBox, prevSkel, prevHp = {}, {}, {}
+		local prevName
 
 		local function findViewport()
 			if previewViewport and previewViewport.Parent then
@@ -984,46 +1373,110 @@ return function(lib)
 			return previewViewport
 		end
 
-		local function hidePreview()
-			for _, l in ipairs(previewLines) do
-				l.Visible = false
+		local function getFrame(pool, i, name)
+			local f = pool[i]
+			if not f then
+				f = Instance.new("Frame")
+				f.Name = name
+				f.BorderSizePixel = 0
+				f.Active = false
+				f.ZIndex = 20
+				f.Visible = false
+				pool[i] = f
+			end
+			if f.Parent ~= previewViewport then
+				f.Parent = previewViewport
+			end
+			return f
+		end
+
+		local function hidePool(pool)
+			for _, f in ipairs(pool) do
+				f.Visible = false
 			end
 		end
 
-		local function drawPreview(count)
+		local function hidePreview()
+			hidePool(prevBox)
+			hidePool(prevSkel)
+			hidePool(prevHp)
+			if prevName then
+				prevName.Visible = false
+			end
+		end
+
+		local function drawLinePool(pool, count, list, slot, thick)
+			local c = colorOf(slot)
 			for i = 1, count do
-				local l = previewLines[i]
-				if not l then
-					l = Instance.new("Frame")
-					l.Name = "BoxEspLine"
-					l.AnchorPoint = Vector2.new(0.5, 0.5)
-					l.BorderSizePixel = 0
-					l.Active = false
-					l.ZIndex = 20
-					l.Visible = false
-					previewLines[i] = l
-				end
-				if l.Parent ~= previewViewport then
-					l.Parent = previewViewport
-				end
-				local sg = segs[i]
+				local l = getFrame(pool, i, "EspLine")
+				local sg = list[i]
 				local dx, dy = sg[3] - sg[1], sg[4] - sg[2]
 				local len = math.sqrt(dx * dx + dy * dy)
-				l.BackgroundColor3 = color
-				l.BackgroundTransparency = 1 - alpha
+				l.AnchorPoint = Vector2.new(0.5, 0.5)
+				l.BackgroundColor3 = c
+				l.BackgroundTransparency = 1 - slot.a
 				l.Position = UDim2.fromOffset((sg[1] + sg[3]) / 2, (sg[2] + sg[4]) / 2)
-				l.Size = UDim2.fromOffset(len + THICKNESS, THICKNESS)
+				l.Size = UDim2.fromOffset(len + thick, thick)
 				l.Rotation = math.deg(math.atan2(dy, dx))
 				l.Visible = true
 			end
-			for i = count + 1, #previewLines do
-				previewLines[i].Visible = false
+			for i = count + 1, #pool do
+				pool[i].Visible = false
 			end
+		end
+
+		local function drawHealthPreview(count)
+			-- pool[1] = background, pool[2..] = fill rectangles
+			local bg = getFrame(prevHp, 1, "EspHpBg")
+			bg.AnchorPoint = Vector2.new(0, 0)
+			bg.Rotation = 0
+			bg.BackgroundColor3 = Color3.fromRGB(10, 10, 12)
+			bg.BackgroundTransparency = 0.3
+			bg.Position = UDim2.fromOffset(hpBg[1], hpBg[2])
+			bg.Size = UDim2.fromOffset(hpBg[3], hpBg[4])
+			bg.Visible = true
+			for i = 1, count do
+				local r = hpRects[i]
+				local f = getFrame(prevHp, i + 1, "EspHpFill")
+				f.AnchorPoint = Vector2.new(0, 0)
+				f.Rotation = 0
+				f.BackgroundColor3 = r[5]
+				f.BackgroundTransparency = 0
+				f.Position = UDim2.fromOffset(r[1], r[2])
+				f.Size = UDim2.fromOffset(r[3], r[4])
+				f.Visible = true
+			end
+			for i = count + 2, #prevHp do
+				prevHp[i].Visible = false
+			end
+		end
+
+		local function drawNamePreview()
+			if not prevName then
+				prevName = Instance.new("TextLabel")
+				prevName.Name = "EspName"
+				prevName.BackgroundTransparency = 1
+				prevName.AnchorPoint = Vector2.new(0.5, 1)
+				prevName.Size = UDim2.fromOffset(220, 14)
+				prevName.Font = Enum.Font.GothamMedium
+				prevName.TextSize = 12
+				prevName.TextStrokeTransparency = 0.5
+				prevName.ZIndex = 20
+				prevName.Visible = false
+			end
+			if prevName.Parent ~= previewViewport then
+				prevName.Parent = previewViewport
+			end
+			prevName.Text = nameText(LocalPlayer, 25)
+			prevName.TextColor3 = colorOf(slots.name)
+			prevName.TextTransparency = 1 - slots.name.a
+			prevName.Position = UDim2.fromOffset((bnd.minX + bnd.maxX) / 2, bnd.minY - PAD - 2)
+			prevName.Visible = true
 		end
 
 		local function updatePreview()
 			local viewport = findViewport()
-			if not (master and enabled and popup and popup.Visible and viewport) then
+			if not (master and anyOn() and popup and popup.Visible and viewport) then
 				hidePreview()
 				return
 			end
@@ -1039,80 +1492,227 @@ return function(lib)
 				hidePreview()
 				return
 			end
-			drawPreview(computeSegments(model, makeProjector(camera, vpSize), style))
+
+			local project = makeProjector(camera, vpSize)
+			local needBounds = feat.Name or feat.Health or (feat.Box and style ~= "3D")
+			local hasB = needBounds and computeBounds(model, project)
+
+			-- box
+			local n = feat.Box and computeBox(model, project, style, hasB) or 0
+			drawLinePool(prevBox, n, segs, slots.box, THICKNESS)
+
+			-- skeleton
+			n = feat.Skeleton and computeSkeleton(model, project) or 0
+			drawLinePool(prevSkel, n, bones, slots.skel, skelThick)
+
+			-- health bar (the preview health slowly moves up and down so the colors are visible)
+			if feat.Health and hasB then
+				drawHealthPreview(computeHealth(0.575 + 0.425 * math.sin(os.clock() * 0.9)))
+			else
+				hidePool(prevHp)
+			end
+
+			-- name
+			if feat.Name and hasB then
+				drawNamePreview()
+			elseif prevName then
+				prevName.Visible = false
+			end
 		end
 
 		-- ====================================================
 		-- real ESP (only while the menu is hidden)
 		-- ====================================================
-		local boxes = {} -- [player] = {lines = {}, shown = 0, version = n}
+		local records = {} -- [player] = {...drawing objects...}
 
 		local function newLine()
 			local l = Drawing.new("Line")
-			l.Color = color
-			l.Transparency = drawingAlpha()
-			l.Thickness = THICKNESS
 			l.Visible = false
 			return l
 		end
 
-		local function removeBox(player)
-			local rec = boxes[player]
+		local function newSquare()
+			local sq = Drawing.new("Square")
+			sq.Filled = true
+			sq.Thickness = 1
+			sq.Visible = false
+			return sq
+		end
+
+		local function newRecord()
+			return {
+				box = {}, boxShown = 0,
+				skel = {}, skelShown = 0,
+				hp = {}, hpShown = 0, hpBg = nil, hpBgShown = false,
+				name = nil, nameShown = false,
+			}
+		end
+
+		local function removeRecord(player)
+			local rec = records[player]
 			if not rec then
 				return
 			end
-			for _, l in ipairs(rec.lines) do
-				pcall(function() l:Remove() end)
+			local function kill(obj)
+				pcall(function() obj:Remove() end)
 			end
-			boxes[player] = nil
+			for _, l in ipairs(rec.box) do kill(l) end
+			for _, l in ipairs(rec.skel) do kill(l) end
+			for _, sq in ipairs(rec.hp) do kill(sq) end
+			if rec.hpBg then kill(rec.hpBg) end
+			if rec.name then kill(rec.name) end
+			records[player] = nil
 		end
 
-		local function getBox(player)
-			local rec = boxes[player]
-			if not rec then
-				rec = {lines = {}, shown = 0, version = styleVersion}
-				boxes[player] = rec
-			end
-			return rec
+		local function hideRecord(rec)
+			for i = 1, rec.boxShown do rec.box[i].Visible = false end
+			rec.boxShown = 0
+			for i = 1, rec.skelShown do rec.skel[i].Visible = false end
+			rec.skelShown = 0
+			for i = 1, rec.hpShown do rec.hp[i].Visible = false end
+			rec.hpShown = 0
+			if rec.hpBg then rec.hpBg.Visible = false end
+			rec.hpBgShown = false
+			if rec.name then rec.name.Visible = false end
+			rec.nameShown = false
 		end
 
 		local function hideAll()
-			for _, rec in pairs(boxes) do
-				for i = 1, rec.shown do
-					rec.lines[i].Visible = false
-				end
-				rec.shown = 0
+			for _, rec in pairs(records) do
+				hideRecord(rec)
 			end
 		end
 
-		local function drawBox(rec, count)
-			local lines = rec.lines
-			while #lines < count do
-				table.insert(lines, newLine())
+		-- draws `count` segments from `src` on the line list, hides the rest, returns count
+		local function setLines(list, prevShown, count, src, slot, thick)
+			while #list < count do
+				table.insert(list, newLine())
 			end
-			if rec.version ~= styleVersion then
-				rec.version = styleVersion
-				for _, l in ipairs(lines) do
-					l.Color = color
-					l.Transparency = drawingAlpha()
-				end
-			end
+			local c, a = colorOf(slot), dAlpha(slot.a)
 			for i = 1, count do
-				local sg, l = segs[i], lines[i]
+				local sg, l = src[i], list[i]
+				l.Color = c
+				l.Transparency = a
+				l.Thickness = thick
 				l.From = Vector2.new(sg[1], sg[2])
 				l.To = Vector2.new(sg[3], sg[4])
 				l.Visible = true
 			end
-			for i = count + 1, rec.shown do
-				lines[i].Visible = false
+			for i = count + 1, prevShown do
+				list[i].Visible = false
 			end
-			rec.shown = count
+			return count
+		end
+
+		-- draws `count` health rectangles (hpRects), hides the rest, returns count
+		local function setSquares(list, prevShown, count)
+			while #list < count do
+				table.insert(list, newSquare())
+			end
+			for i = 1, count do
+				local r, sq = hpRects[i], list[i]
+				sq.Position = Vector2.new(r[1], r[2])
+				sq.Size = Vector2.new(r[3], r[4])
+				sq.Color = r[5]
+				sq.Transparency = dAlpha(1)
+				sq.Visible = true
+			end
+			for i = count + 1, prevShown do
+				list[i].Visible = false
+			end
+			return count
+		end
+
+		local function updatePlayer(player, camera, project, camPos)
+			local char = player.Character
+			local hum = char and char:FindFirstChildOfClass("Humanoid")
+			local root = char and char:FindFirstChild("HumanoidRootPart")
+			local rec = records[player]
+
+			local pass = char ~= nil and hum ~= nil and root ~= nil and hum.Health > 0
+			local dist = 0
+			if pass then
+				dist = (root.Position - camPos).Magnitude
+				if teamCheck and sameTeam(player) then
+					pass = false
+				elseif dist > renderDist then
+					pass = false
+				elseif visCheck and not isVisible(char, camera) then
+					pass = false
+				end
+			end
+			if not pass then
+				if rec then
+					hideRecord(rec)
+				end
+				return
+			end
+
+			if not rec then
+				rec = newRecord()
+				records[player] = rec
+			end
+
+			local needBounds = feat.Name or feat.Health or (feat.Box and style ~= "3D")
+			local hasB = needBounds and computeBounds(char, project)
+
+			-- box
+			local n = feat.Box and computeBox(char, project, style, hasB) or 0
+			rec.boxShown = setLines(rec.box, rec.boxShown, n, segs, slots.box, THICKNESS)
+
+			-- skeleton
+			n = feat.Skeleton and computeSkeleton(char, project) or 0
+			rec.skelShown = setLines(rec.skel, rec.skelShown, n, bones, slots.skel, skelThick)
+
+			-- health bar
+			if feat.Health and hasB then
+				n = computeHealth(healthFrac(hum))
+				if not rec.hpBg then
+					rec.hpBg = newSquare()
+					rec.hpBg.Color = Color3.fromRGB(10, 10, 12)
+					rec.hpBg.Transparency = dAlpha(0.7)
+				end
+				rec.hpBg.Position = Vector2.new(hpBg[1], hpBg[2])
+				rec.hpBg.Size = Vector2.new(hpBg[3], hpBg[4])
+				rec.hpBg.Visible = true
+				rec.hpBgShown = true
+				rec.hpShown = setSquares(rec.hp, rec.hpShown, n)
+			else
+				for i = 1, rec.hpShown do rec.hp[i].Visible = false end
+				rec.hpShown = 0
+				if rec.hpBg and rec.hpBgShown then
+					rec.hpBg.Visible = false
+					rec.hpBgShown = false
+				end
+			end
+
+			-- name
+			if feat.Name and hasB then
+				if not rec.name then
+					local t = Drawing.new("Text")
+					t.Size = 13
+					t.Center = true
+					t.Outline = true
+					t.Visible = false
+					rec.name = t
+				end
+				local t = rec.name
+				t.Text = nameText(player, dist)
+				t.Color = colorOf(slots.name)
+				t.Transparency = dAlpha(slots.name.a)
+				t.Position = Vector2.new((bnd.minX + bnd.maxX) / 2, bnd.minY - PAD - 16)
+				t.Visible = true
+				rec.nameShown = true
+			elseif rec.name and rec.nameShown then
+				rec.name.Visible = false
+				rec.nameShown = false
+			end
 		end
 
 		local wasActive = false
 		local function updateEsp()
-			-- master off, Box Esp off, or menu open -> nothing on the real players
-			local active = hasDrawing and master and enabled and win.gui.Parent ~= nil and not win.gui.Enabled
+			-- master off, no feature on, or menu open -> nothing on the real players
+			local active = hasDrawing and master and anyOn() and win.gui.Parent ~= nil and not win.gui.Enabled
 			if not active then
 				if wasActive then
 					hideAll()
@@ -1130,28 +1730,7 @@ return function(lib)
 			local camPos = camera.CFrame.Position
 			for _, player in ipairs(Players:GetPlayers()) do
 				if player ~= LocalPlayer then
-					local char = player.Character
-					local hum = char and char:FindFirstChildOfClass("Humanoid")
-					local root = char and char:FindFirstChild("HumanoidRootPart")
-					local count = 0
-					if char and hum and root and hum.Health > 0 then
-						local pass = true
-						if teamCheck and sameTeam(player) then
-							pass = false
-						end
-						if pass and (root.Position - camPos).Magnitude > renderDist then
-							pass = false
-						end
-						if pass and visCheck and not isVisible(char, camera) then
-							pass = false
-						end
-						if pass then
-							count = computeSegments(char, project, style)
-						end
-					end
-					if count > 0 or boxes[player] then
-						drawBox(getBox(player), count)
-					end
+					updatePlayer(player, camera, project, camPos)
 				end
 			end
 		end
@@ -1162,33 +1741,54 @@ return function(lib)
 			updatePreview()
 			updateEsp()
 		end)
-		local removingConn = Players.PlayerRemoving:Connect(removeBox)
+		local removingConn = Players.PlayerRemoving:Connect(removeRecord)
 
 		local function destroy()
 			renderConn:Disconnect()
 			removingConn:Disconnect()
 			moveConn:Disconnect()
 			endConn:Disconnect()
-			for player in pairs(boxes) do
-				removeBox(player)
+			for player in pairs(records) do
+				removeRecord(player)
 			end
-			for _, l in ipairs(previewLines) do
-				l:Destroy()
+			for _, pool in ipairs({prevBox, prevSkel, prevHp}) do
+				for _, f in ipairs(pool) do
+					f:Destroy()
+				end
+			end
+			if prevName then
+				prevName:Destroy()
 			end
 			settings:Destroy()
-			boxCard:Destroy()
+			featCard:Destroy()
 		end
 		win.onClose(destroy)
 
+		-- ====================================================
+		-- API
+		-- ====================================================
 		return {
 			SetMaster = function(value)
 				masterSwitch.Set(value)
 			end,
+			-- Box Esp switch (kept for backwards compatibility)
 			SetEnabled = function(value)
-				boxSwitch.Set(value)
+				featSwitch.Box.Set(value)
+			end,
+			SetBoxEsp = function(value)
+				featSwitch.Box.Set(value)
+			end,
+			SetNameEsp = function(value)
+				featSwitch.Name.Set(value)
+			end,
+			SetHealthEsp = function(value)
+				featSwitch.Health.Set(value)
+			end,
+			SetSkeletonEsp = function(value)
+				featSwitch.Skeleton.Set(value)
 			end,
 			IsEnabled = function()
-				return master and enabled
+				return master and anyOn()
 			end,
 			SetTeamCheck = function(value)
 				teamSwitch.Set(value)
@@ -1199,21 +1799,64 @@ return function(lib)
 			SetRenderDistance = function(studs)
 				setDistance(math.floor(studs / DIST_STEP + 0.5) * DIST_STEP)
 			end,
+
+			-- box
 			SetStyle = function(name)
 				if indexOf(STYLES, name) then
-					style = name
-					refreshStyleButtons(true)
+					styleChoice.Set(name)
 				end
 			end,
-			SetColor = function(c)
-				h, s, v = rgbToHsv(c)
-				h = math.min(h, 0.999)
-				refreshColor()
+			SetColor = function(c) -- box color
+				local hh, ss, vv = rgbToHsv(c)
+				slots.box.h, slots.box.s, slots.box.v = math.min(hh, 0.999), ss, vv
+				refreshAllPickers()
 			end,
-			SetAlpha = function(a)
-				alpha = math.clamp(a, 0, 1)
-				refreshColor()
+			SetAlpha = function(a) -- box alpha
+				slots.box.a = math.clamp(a, 0, 1)
+				refreshAllPickers()
 			end,
+
+			-- name
+			SetNameSource = function(name) -- "Display" / "Username" / "Both"
+				if indexOf(NAME_SOURCES, name) then
+					sourceChoice.Set(name)
+				end
+			end,
+			SetNameDistance = function(value)
+				nameDistChoice.Set(value and "On" or "Off")
+			end,
+			SetNameColor = function(c)
+				local hh, ss, vv = rgbToHsv(c)
+				slots.name.h, slots.name.s, slots.name.v = math.min(hh, 0.999), ss, vv
+				refreshAllPickers()
+			end,
+
+			-- health bar
+			SetHealthMode = function(name) -- "Solid" / "Gradient"
+				if name == "Solid" or name == "Gradient" then
+					hpModeChoice.Set(name)
+				end
+			end,
+			SetHealthColors = function(full, mid, low)
+				for key, c in pairs({hpFull = full, hpMid = mid, hpLow = low}) do
+					local hh, ss, vv = rgbToHsv(c)
+					slots[key].h, slots[key].s, slots[key].v = math.min(hh, 0.999), ss, vv
+				end
+				refreshAllPickers()
+			end,
+
+			-- skeleton
+			SetSkeletonColor = function(c)
+				local hh, ss, vv = rgbToHsv(c)
+				slots.skel.h, slots.skel.s, slots.skel.v = math.min(hh, 0.999), ss, vv
+				refreshAllPickers()
+			end,
+			SetSkeletonThickness = function(name) -- "Thin" / "Normal" / "Thick"
+				if THICKNESSES[name] then
+					thickChoice.Set(name)
+				end
+			end,
+
 			Destroy = destroy,
 		}
 	end
