@@ -216,7 +216,8 @@ return function(lib)
 			AimAtNearestPart = false,
 			UseMouseMoveRel = true, -- false = turn the camera instead
 			Sticky = true, -- stay locked on one player until they die / leave / you release the key
-			PredictionEnabled = true,
+			PredictionEnabled = false,
+			SmoothEnabled = false,
 			PredX = 6, -- 1 - 20, higher = more prediction (horizontal)
 			PredY = 6, -- 1 - 20, higher = more prediction (vertical)
 			SmoothX = 15, -- 1 - 100, higher = smoother / slower (horizontal)
@@ -244,6 +245,7 @@ return function(lib)
 		-- ui building blocks
 		-- ====================================================
 		local dragFn
+		local dragEnd -- called when the slider being dragged is released
 		local listeningEntry -- keybind row waiting for a key
 
 		local function isPress(input)
@@ -414,9 +416,9 @@ return function(lib)
 		end
 
 		-- card header: title + switch
-		local function addHeader(card, title, initial, onChange)
+		local function addHeader(card, title, initial, onChange, order)
 			local row = Instance.new("Frame")
-			row.LayoutOrder = 1
+			row.LayoutOrder = order or 1
 			row.BackgroundTransparency = 1
 			row.Size = UDim2.new(1, 0, 0, 40)
 			row.Parent = card
@@ -525,7 +527,7 @@ return function(lib)
 		end
 
 		-- slider with a value read-out
-		local function addSlider(parent, order, title, min, max, default, suffix, onChange)
+		local function addSlider(parent, order, title, min, max, default, suffix, onChange, onActive)
 			local row = Instance.new("Frame")
 			row.LayoutOrder = order
 			row.BackgroundTransparency = 1
@@ -607,6 +609,12 @@ return function(lib)
 						setValue(min + math.clamp((m.X - ap.X) / as.X, 0, 1) * (max - min), true)
 					end
 					dragFn()
+					if onActive then
+						onActive(true)
+						dragEnd = function()
+							onActive(false)
+						end
+					end
 				end
 			end)
 		end
@@ -865,7 +873,10 @@ return function(lib)
 					+ cf.UpVector * smoothVel:Dot(cf.UpVector) * cfg.PredY / 100
 			end
 
-			local ax, ay = blend(cfg.SmoothX, dt), blend(cfg.SmoothY, dt)
+			local ax, ay = 1, 1
+			if cfg.SmoothEnabled then
+				ax, ay = blend(cfg.SmoothX, dt), blend(cfg.SmoothY, dt)
+			end
 
 			if cfg.UseMouseMoveRel and mousemoverel_ then
 				local v = camera:WorldToViewportPoint(position)
@@ -1008,6 +1019,11 @@ return function(lib)
 		table.insert(connections, UserInputService.InputEnded:Connect(function(input, processed)
 			if isPress(input) then
 				dragFn = nil
+				if dragEnd then
+					local fn = dragEnd
+					dragEnd = nil
+					fn()
+				end
 			end
 			if processed then
 				return
@@ -1031,6 +1047,238 @@ return function(lib)
 			aimStep(dt)
 			triggerStep()
 		end))
+
+		-- ====================================================
+		-- side graph panel: docks right of the window while a prediction / smoothness
+		-- slider is being dragged and animates its curves toward the new values
+		-- ====================================================
+		local function buildGraphPanel()
+			local SIDE_W, SIDE_GAP = 260, 8
+			local PLOT_X, PLOT_Y, PLOT_W, PLOT_H = 44, 74, 200, 130
+			local COL_X, COL_Y = Color3.fromRGB(235, 235, 240), Color3.fromRGB(110, 160, 255)
+			local PRED_MAX_SPEED, PRED_MAX_LEAD = 50, 10 -- studs/s, studs
+			local SMOOTH_MAX_T = 0.5 -- seconds
+			local POINTS = 32
+
+			local MODES = {
+				Prediction = {sub = "Lead distance vs target speed", yTop = "10 st", yMid = "5", yBot = "0", xRight = "50 st/s"},
+				Smoothness = {sub = "Aim error left over time", yTop = "100%", yMid = "50%", yBot = "0", xRight = "0.5 s"},
+			}
+
+			local side = Instance.new("Frame")
+			side.Name = "AimGraphPopup"
+			side.AnchorPoint = Vector2.new(0.5, 0.5)
+			side.Size = UDim2.new(0, SIDE_W, 1, 0)
+			side.Position = UDim2.new(1, SIDE_GAP + SIDE_W / 2, 0.5, 0)
+			side.BackgroundColor3 = Color3.fromRGB(22, 22, 25)
+			side.BorderSizePixel = 0
+			side.Visible = false
+			side.Parent = win.frame
+			addCorner(side)
+			addStroke(side, Color3.fromRGB(42, 42, 47))
+
+			local sideScale = Instance.new("UIScale")
+			sideScale.Scale = 0.92
+			sideScale.Parent = side
+
+			local function text(parent, str, size, color, font, x, y, w, h, align)
+				local l = Instance.new("TextLabel")
+				l.BackgroundTransparency = 1
+				l.Position = UDim2.fromOffset(x, y)
+				l.Size = UDim2.fromOffset(w, h)
+				l.Font = font or Enum.Font.Gotham
+				l.Text = str
+				l.TextColor3 = color
+				l.TextSize = size
+				l.TextXAlignment = align or Enum.TextXAlignment.Left
+				l.Parent = parent
+				return l
+			end
+
+			local titleLabel = text(side, "", 15, TEXT_MAIN, Enum.Font.GothamBold, 16, 14, SIDE_W - 32, 20)
+			local subLabel = text(side, "", 11, Color3.fromRGB(130, 130, 136), Enum.Font.Gotham, 16, 36, SIDE_W - 32, 16)
+
+			local plot = Instance.new("Frame")
+			plot.Position = UDim2.fromOffset(PLOT_X, PLOT_Y)
+			plot.Size = UDim2.fromOffset(PLOT_W, PLOT_H)
+			plot.BackgroundColor3 = Color3.fromRGB(17, 17, 20)
+			plot.BorderSizePixel = 0
+			plot.ClipsDescendants = true
+			plot.Parent = side
+			addCorner(plot, 4)
+			addStroke(plot, Color3.fromRGB(38, 38, 42))
+
+			for i = 1, 3 do -- horizontal grid
+				local g = Instance.new("Frame")
+				g.Position = UDim2.new(0, 0, i / 4, 0)
+				g.Size = UDim2.new(1, 0, 0, 1)
+				g.BackgroundColor3 = Color3.fromRGB(32, 32, 36)
+				g.BorderSizePixel = 0
+				g.Parent = plot
+			end
+			for i = 1, 3 do -- vertical grid
+				local g = Instance.new("Frame")
+				g.Position = UDim2.new(i / 4, 0, 0, 0)
+				g.Size = UDim2.new(0, 1, 1, 0)
+				g.BackgroundColor3 = Color3.fromRGB(32, 32, 36)
+				g.BorderSizePixel = 0
+				g.Parent = plot
+			end
+
+			local right = Enum.TextXAlignment.Right
+			local DIM = Color3.fromRGB(110, 110, 116)
+			local yTop = text(side, "", 10, DIM, nil, 6, PLOT_Y - 6, 34, 12, right)
+			local yMid = text(side, "", 10, DIM, nil, 6, PLOT_Y + PLOT_H / 2 - 6, 34, 12, right)
+			local yBot = text(side, "", 10, DIM, nil, 6, PLOT_Y + PLOT_H - 6, 34, 12, right)
+			text(side, "0", 10, DIM, nil, PLOT_X - 4, PLOT_Y + PLOT_H + 4, 20, 12)
+			local xRight = text(side, "", 10, DIM, nil, PLOT_X + PLOT_W - 60, PLOT_Y + PLOT_H + 4, 60, 12, right)
+
+			-- a polyline made of rotated 2px frames
+			local function newLine(color)
+				local segs = {}
+				for i = 1, POINTS - 1 do
+					local f = Instance.new("Frame")
+					f.AnchorPoint = Vector2.new(0.5, 0.5)
+					f.BackgroundColor3 = color
+					f.BorderSizePixel = 0
+					f.ZIndex = 3
+					f.Parent = plot
+					segs[i] = f
+				end
+				return function(pts)
+					for i, f in ipairs(segs) do
+						local a, b = pts[i], pts[i + 1]
+						local d = b - a
+						f.Size = UDim2.fromOffset(d.Magnitude + 1.5, 2)
+						f.Position = UDim2.fromOffset((a.X + b.X) / 2, (a.Y + b.Y) / 2)
+						f.Rotation = math.deg(math.atan2(d.Y, d.X))
+					end
+				end
+			end
+			local drawX, drawY = newLine(COL_X), newLine(COL_Y)
+
+			-- legend rows
+			local function legendRow(y, color, name)
+				local dot = Instance.new("Frame")
+				dot.Position = UDim2.fromOffset(16, y + 4)
+				dot.Size = UDim2.fromOffset(8, 8)
+				dot.BackgroundColor3 = color
+				dot.BorderSizePixel = 0
+				dot.Parent = side
+				addCorner(dot, 4)
+				text(side, name, 12, TEXT_SOFT, Enum.Font.GothamMedium, 30, y, 100, 16)
+				return text(side, "", 12, TEXT_MAIN, Enum.Font.GothamMedium, 110, y, SIDE_W - 126, 16, right)
+			end
+			local valX = legendRow(236, COL_X, "X axis")
+			local valY = legendRow(258, COL_Y, "Y axis")
+
+			-- state
+			local mode = "Prediction"
+			local shownX, shownY = 0, 0
+			local wanted, token = false, 0
+
+			local function targets()
+				if mode == "Prediction" then
+					return cfg.PredX, cfg.PredY
+				end
+				return cfg.SmoothX, cfg.SmoothY
+			end
+
+			local function curve(v)
+				local pts = {}
+				for i = 0, POINTS - 1 do
+					local t = i / (POINTS - 1)
+					local y
+					if mode == "Prediction" then
+						y = math.clamp(t * PRED_MAX_SPEED * (v / 100) / PRED_MAX_LEAD, 0, 1)
+					else
+						y = (1 - 1 / math.max(v, 1)) ^ (t * SMOOTH_MAX_T * 60)
+					end
+					pts[i + 1] = Vector2.new(t * PLOT_W, (1 - y) * PLOT_H)
+				end
+				return pts
+			end
+
+			local function applyMode()
+				local m = MODES[mode]
+				titleLabel.Text = mode
+				subLabel.Text = m.sub
+				yTop.Text, yMid.Text, yBot.Text, xRight.Text = m.yTop, m.yMid, m.yBot, m.xRight
+			end
+
+			local function redraw()
+				drawX(curve(shownX))
+				drawY(curve(shownY))
+				local tx, ty = targets()
+				if mode == "Prediction" then
+					valX.Text = string.format("%.2f s lead", tx / 100)
+					valY.Text = string.format("%.2f s lead", ty / 100)
+				else
+					valX.Text = tostring(tx)
+					valY.Text = tostring(ty)
+				end
+			end
+
+			local conn = RunService.RenderStepped:Connect(function(dt)
+				if not side.Visible then
+					return
+				end
+				-- follow the window: right side, or left when there's no room
+				local p, sz = win.frame.AbsolutePosition, win.frame.AbsoluteSize
+				local roomRight = p.X + sz.X + SIDE_GAP + SIDE_W <= win.gui.AbsoluteSize.X
+				side.Position = roomRight
+					and UDim2.new(1, SIDE_GAP + SIDE_W / 2, 0.5, 0)
+					or UDim2.new(0, -(SIDE_GAP + SIDE_W / 2), 0.5, 0)
+
+				-- ease the drawn values toward the real ones so the curves glide
+				local tx, ty = targets()
+				local k = 1 - math.exp(-dt * 14)
+				shownX += (tx - shownX) * k
+				shownY += (ty - shownY) * k
+				redraw()
+			end)
+
+			local api = {}
+
+			function api.Active(kind, on)
+				token += 1
+				if on then
+					if mode ~= kind or not side.Visible then
+						mode = kind
+						applyMode()
+						shownX, shownY = targets()
+					end
+					wanted = true
+					side.Visible = true
+					TweenService:Create(sideScale, slideInfo, {Scale = 1}):Play()
+				else
+					local mine = token
+					task.delay(0.6, function()
+						if mine ~= token or destroyed then
+							return
+						end
+						wanted = false
+						local out = TweenService:Create(sideScale, fadeInfo, {Scale = 0.92})
+						out.Completed:Connect(function()
+							if not wanted then
+								side.Visible = false
+							end
+						end)
+						out:Play()
+					end)
+				end
+			end
+
+			function api.Destroy()
+				conn:Disconnect()
+				side:Destroy()
+			end
+
+			applyMode()
+			return api
+		end
+
+		local graphPanel = buildGraphPanel()
 
 		-- ====================================================
 		-- AimBot page
@@ -1080,36 +1328,47 @@ return function(lib)
 				opts.setOpen(cfg.Enabled, false)
 			end
 
-			-- Prediction and Smoothness (one window)
+			-- Prediction and Smoothness (one window, two switches; options open when on)
 			do
 				local card = newCard(scroll, nextOrder())
-				addTitle(card, "Prediction and Smoothness")
-				local body = Instance.new("Frame")
-				body.LayoutOrder = 2
-				body.BackgroundTransparency = 1
-				body.Size = UDim2.new(1, 0, 0, 0)
-				body.AutomaticSize = Enum.AutomaticSize.Y
-				body.Parent = card
-				local bl = Instance.new("UIListLayout")
-				bl.SortOrder = Enum.SortOrder.LayoutOrder
-				bl.Parent = body
 
-				addDivider(body, 0)
-				addSwitchRow(body, 1, "Prediction", cfg.PredictionEnabled, function(v)
+				local pOpts = newOptions(card, 2)
+				addHeader(card, "Prediction", cfg.PredictionEnabled, function(v)
 					cfg.PredictionEnabled = v
-				end)
-				addSlider(body, 2, "Prediction X", 1, 20, cfg.PredX, "", function(v)
+					pOpts.setOpen(v, true)
+				end, 1)
+				addSlider(pOpts.group, 1, "X axis", 1, 20, cfg.PredX, "", function(v)
 					cfg.PredX = v
+				end, function(on)
+					graphPanel.Active("Prediction", on)
 				end)
-				addSlider(body, 3, "Prediction Y", 1, 20, cfg.PredY, "", function(v)
+				addSlider(pOpts.group, 2, "Y axis", 1, 20, cfg.PredY, "", function(v)
 					cfg.PredY = v
+				end, function(on)
+					graphPanel.Active("Prediction", on)
 				end)
-				addSlider(body, 4, "Smoothness X", 1, 100, cfg.SmoothX, "", function(v)
+				pOpts.height += SLIDER_H * 2
+				pOpts.setOpen(cfg.PredictionEnabled, false)
+
+				addDivider(card, 3)
+
+				local sOpts = newOptions(card, 5)
+				addHeader(card, "Smoothness", cfg.SmoothEnabled, function(v)
+					cfg.SmoothEnabled = v
+					sOpts.setOpen(v, true)
+				end, 4)
+				addSlider(sOpts.group, 1, "X axis", 1, 100, cfg.SmoothX, "", function(v)
 					cfg.SmoothX = v
+				end, function(on)
+					graphPanel.Active("Smoothness", on)
 				end)
-				addSlider(body, 5, "Smoothness Y", 1, 100, cfg.SmoothY, "", function(v)
+				addSlider(sOpts.group, 2, "Y axis", 1, 100, cfg.SmoothY, "", function(v)
 					cfg.SmoothY = v
+				end, function(on)
+					graphPanel.Active("Smoothness", on)
 				end)
+				sOpts.height += SLIDER_H * 2
+				sOpts.setOpen(cfg.SmoothEnabled, false)
 			end
 
 			-- Checks (team + raycast visible check, one window)
@@ -1176,6 +1435,7 @@ return function(lib)
 			destroyed = true
 			cfg.Enabled = false
 			trig.Enabled = false
+			graphPanel.Destroy()
 			for _, conn in ipairs(connections) do
 				conn:Disconnect()
 			end
