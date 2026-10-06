@@ -5,7 +5,8 @@
 --
 -- AimBot : mouse / camera aim with sticky target lock, per-axis smoothness + prediction,
 --          team check and a raycast visible check.
--- Trigger: the trigger bot from the same script (delay, clicks/sec, spam, aim-key only).
+-- Trigger: trigger bot with its own key (hold / toggle), delay, clicks/sec, hitbox multiplier,
+--          team check and visible check.
 -- Silent : empty page, ready for content.
 --
 -- returns:
@@ -227,10 +228,13 @@ return function(lib)
 			Ignore = {}, -- extra instances the visible check ray should ignore
 			Trigger = {
 				Enabled = false,
+				Mode = "Hold", -- "Hold" (active while the key is down) or "Toggle" (key turns it on / off)
+				Keybind = "V",
 				Delay = 60, -- milliseconds before the first click
-				Spam = true, -- click over and over (semi-auto weapons)
 				ClicksPerSecond = 10,
-				UseKeybind = false, -- only while the aim key is held
+				HitboxMult = 2, -- scales every body part's hitbox for the crosshair test
+				TeamCheck = false,
+				VisibleCheck = false,
 			},
 		}
 		local trig = cfg.Trigger
@@ -694,6 +698,8 @@ return function(lib)
 		local aiming = false
 		local mousedown = false
 		local triggering = false
+		local trigHeld = false -- trigger key is down (Hold mode)
+		local trigOn = false -- trigger switched on by the key (Toggle mode)
 
 		local function isAlive(plr)
 			local char = plr.Character
@@ -708,9 +714,12 @@ return function(lib)
 			return table.find(cfg.Whitelisted, plr.Name) ~= nil or table.find(cfg.Whitelisted, plr.UserId) ~= nil
 		end
 
-		local function isEnemy(plr)
+		local function isEnemy(plr, check)
+			if check == nil then
+				check = cfg.TeamCheck
+			end
 			local team = plr.Team
-			return not cfg.TeamCheck or team == nil or team ~= player.Team
+			return not check or team == nil or team ~= player.Team
 		end
 
 		local function validTarget(plr)
@@ -770,8 +779,8 @@ return function(lib)
 		rayParams.IgnoreWater = true
 
 		-- ray from the camera to the target; transparent parts don't block it
-		local function isVisible(char, targetPart)
-			if not cfg.VisibleCheck then
+		local function isVisible(char, targetPart, enabled)
+			if not enabled then
 				return true
 			end
 			local origin = camera.CFrame.Position
@@ -859,7 +868,7 @@ return function(lib)
 			end
 
 			local target = pickTarget(char)
-			if not target or not isVisible(char, target) then
+			if not target or not isVisible(char, target, cfg.VisibleCheck) then
 				return -- lock is kept, aim just pauses while the target is hidden
 			end
 
@@ -906,30 +915,73 @@ return function(lib)
 		-- ====================================================
 		-- trigger bot
 		-- ====================================================
-		local function targetUnderMouse()
-			local part = Mouse.Target
-			if not part then
-				return nil
+		-- ray vs. a body part's box scaled by `mult`; returns how far along the ray it hits, or nil
+		local function rayBox(origin, dir, part, mult)
+			local cf = part.CFrame
+			local o = cf:PointToObjectSpace(origin)
+			local d = cf:VectorToObjectSpace(dir)
+			local half = part.Size * 0.5 * mult
+			local tmin, tmax = 0, 1
+			for _, axis in ipairs({"X", "Y", "Z"}) do
+				local oa, da, h = o[axis], d[axis], half[axis]
+				if math.abs(da) < 1e-8 then
+					if math.abs(oa) > h then
+						return nil
+					end
+				else
+					local t1, t2 = (-h - oa) / da, (h - oa) / da
+					if t1 > t2 then
+						t1, t2 = t2, t1
+					end
+					tmin, tmax = math.max(tmin, t1), math.min(tmax, t2)
+					if tmin > tmax then
+						return nil
+					end
+				end
 			end
-			local model = part:FindFirstAncestorOfClass("Model")
-			local plr = model and Players:GetPlayerFromCharacter(model)
-			if not plr or plr == player or not isAlive(plr) or isWhitelisted(plr) then
-				return nil
+			return tmin
+		end
+
+		-- the closest enemy whose (scaled) hitbox sits under the crosshair
+		local function targetUnderCrosshair()
+			local loc = UserInputService:GetMouseLocation()
+			local ray = camera:ViewportPointToRay(loc.X, loc.Y)
+			local origin, dir = ray.Origin, ray.Direction * 1000
+
+			local bestPlr, bestPart, bestT = nil, nil, math.huge
+			for _, plr in ipairs(Players:GetPlayers()) do
+				if plr ~= player and isAlive(plr) and not isWhitelisted(plr) and isEnemy(plr, trig.TeamCheck) then
+					for _, part in ipairs(plr.Character:GetChildren()) do
+						if BODY[part.Name] and part:IsA("BasePart") then
+							local t = rayBox(origin, dir, part, trig.HitboxMult)
+							if t and t < bestT then
+								bestPlr, bestPart, bestT = plr, part, t
+							end
+						end
+					end
+				end
 			end
-			if cfg.TeamCheck and plr.Team ~= nil and plr.Team == player.Team then
-				return nil
+			if bestPlr and isVisible(bestPlr.Character, bestPart, trig.VisibleCheck) then
+				return bestPlr
 			end
-			return plr
+			return nil
+		end
+
+		local function trigActive()
+			if not trig.Enabled then
+				return false
+			end
+			if trig.Mode == "Toggle" then
+				return trigOn
+			end
+			return trigHeld
 		end
 
 		local function triggerStep()
-			if not trig.Enabled or triggering or mousedown then
+			if triggering or mousedown or not trigActive() then
 				return
 			end
-			if trig.UseKeybind and not aiming then
-				return
-			end
-			local plr = targetUnderMouse()
+			local plr = targetUnderCrosshair()
 			if not plr then
 				return
 			end
@@ -940,7 +992,7 @@ return function(lib)
 					task.wait(trig.Delay / 1000)
 				end
 				local function stillOnTarget()
-					return trig.Enabled and not destroyed and targetUnderMouse() == plr
+					return trigActive() and not destroyed and targetUnderCrosshair() == plr
 				end
 				if not stillOnTarget() then
 					triggering = false
@@ -948,20 +1000,12 @@ return function(lib)
 				end
 
 				local interval = 1 / math.max(trig.ClicksPerSecond, 1)
-				if trig.Spam then
-					repeat
-						if mouse1press_ then mouse1press_() end
-						task.wait(0.02)
-						if mouse1release_ then mouse1release_() end
-						task.wait(interval)
-					until not stillOnTarget()
-				else
+				repeat
 					if mouse1press_ then mouse1press_() end
-					repeat
-						task.wait(0.03)
-					until not stillOnTarget()
+					task.wait(0.02)
 					if mouse1release_ then mouse1release_() end
-				end
+					task.wait(interval)
+				until not stillOnTarget()
 				triggering = false
 			end)
 		end
@@ -969,12 +1013,19 @@ return function(lib)
 		-- ====================================================
 		-- input + loops
 		-- ====================================================
-		local function keyMatches(input)
-			local bind = cfg.Keybind
+		local function bindMatches(bind, input)
 			if bind:find("Mouse") then
 				return input.UserInputType.Name == bind
 			end
 			return input.KeyCode.Name == bind
+		end
+
+		local function keyMatches(input)
+			return bindMatches(cfg.Keybind, input)
+		end
+
+		local function trigMatches(input)
+			return bindMatches(trig.Keybind, input)
 		end
 
 		table.insert(connections, UserInputService.InputBegan:Connect(function(input, processed)
@@ -1011,6 +1062,13 @@ return function(lib)
 					aiming = true
 				end
 			end
+			if trigMatches(input) then
+				if trig.Mode == "Toggle" then
+					trigOn = not trigOn
+				else
+					trigHeld = true
+				end
+			end
 			if input.UserInputType == Enum.UserInputType.MouseButton1 then
 				mousedown = true
 			end
@@ -1024,6 +1082,9 @@ return function(lib)
 					dragEnd = nil
 					fn()
 				end
+			end
+			if trig.Mode == "Hold" and trigMatches(input) then
+				trigHeld = false
 			end
 			if processed then
 				return
@@ -1382,21 +1443,33 @@ return function(lib)
 			local opts = newOptions(card, 2)
 			addHeader(card, "Trigger bot", trig.Enabled, function(v)
 				trig.Enabled = v
+				trigOn, trigHeld = false, false
 				opts.setOpen(v, true)
 			end)
-			addSlider(opts.group, 1, "Delay", 0, 500, trig.Delay, " ms", function(v)
+			addSegmented(opts.group, 1, {"Hold", "Toggle"}, trig.Mode, function(name)
+				trig.Mode = name
+				trigOn, trigHeld = false, false
+			end)
+			addKeyRow(opts.group, 2, "Trigger key", trig.Keybind, function(name)
+				trig.Keybind = name
+				trigOn, trigHeld = false, false
+			end)
+			addSlider(opts.group, 3, "Delay", 0, 500, trig.Delay, " ms", function(v)
 				trig.Delay = v
 			end)
-			addSlider(opts.group, 2, "Clicks per second", 1, 37, trig.ClicksPerSecond, "", function(v)
+			addSlider(opts.group, 4, "Clicks per second", 1, 37, trig.ClicksPerSecond, "", function(v)
 				trig.ClicksPerSecond = v
 			end)
-			addSwitchRow(opts.group, 3, "Spam (semi-auto)", trig.Spam, function(v)
-				trig.Spam = v
+			addSlider(opts.group, 5, "Hitbox multiplier", 1, 10, trig.HitboxMult, "x", function(v)
+				trig.HitboxMult = v
 			end)
-			addSwitchRow(opts.group, 4, "Only while aim key held", trig.UseKeybind, function(v)
-				trig.UseKeybind = v
+			addSwitchRow(opts.group, 6, "Team check", trig.TeamCheck, function(v)
+				trig.TeamCheck = v
 			end)
-			opts.height += SLIDER_H * 2 + SWITCH_H * 2
+			addSwitchRow(opts.group, 7, "Visible check", trig.VisibleCheck, function(v)
+				trig.VisibleCheck = v
+			end)
+			opts.height += METHODS_H + KEY_H + SLIDER_H * 3 + SWITCH_H * 2
 			opts.setOpen(trig.Enabled, false)
 		end
 
