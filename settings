@@ -9,11 +9,11 @@
 --   Keybind list  switch for the on-screen list (off when the script starts)
 --
 -- Keybind list (own ScreenGui, middle left of the screen, visible while its switch is on):
---   * every module that is switched on shows up:   "No-Clip ............ [X]"
---     - key set        -> name on the left, key on the far right
---     - no key set     -> just the name ("Jump Power", "Gravity", ...)
---     - waiting for its key (switch on, not toggled yet) -> shown dimmed
---   * the whole Visuals tab is a single "ESP" entry (master switch + at least one ESP on)
+--   * every module has a line:   "No-Clip            [X]"   (name left, [key] right, no key = just the name)
+--     - bright = running, grey = switch on but waiting for its key, dark = module is off
+--     - turning a module off greys it out, turning it on again makes it look normal
+--   * the whole Visuals tab is a single "ESP" line (master switch + at least one ESP on = on)
+--   * the top-left corner is the anchor, so the list only ever grows downwards
 --   * while the menu is OPEN you can drag the list anywhere; while the menu is HIDDEN it stays
 --     where it is until you open the menu again
 --   * modules add themselves with lib.registerKeybind({name, getEnabled, getActive?, getKey?});
@@ -36,14 +36,13 @@ return function(lib)
 	local OFF_KNOB = Color3.fromRGB(140, 140, 146)
 
 	-- keybind list look
-	local LIST_W, ROW_H, HEADER_H = 200, 24, 28
-	local LIST_BG = Color3.fromRGB(20, 20, 23)
-	local LIST_STROKE_IDLE = Color3.fromRGB(42, 42, 47)
-	local LIST_STROKE_MOVABLE = Color3.fromRGB(88, 88, 98)
-	local NAME_ON = Color3.fromRGB(245, 245, 248)
-	local NAME_DIM = Color3.fromRGB(125, 125, 132)
-	local CHIP_ON = Color3.fromRGB(225, 225, 232)
-	local CHIP_DIM = Color3.fromRGB(125, 125, 132)
+	local LIST_W, ROW_H, HEADER_H = 170, 20, 24
+	local LIST_BG = Color3.fromRGB(17, 17, 19)
+	local LIST_STROKE_IDLE = Color3.fromRGB(45, 45, 50)
+	local LIST_STROKE_MOVABLE = Color3.fromRGB(90, 90, 100)
+	local COLOR_ON = Color3.fromRGB(238, 238, 242)   -- module is running
+	local COLOR_WAIT = Color3.fromRGB(150, 150, 158) -- switch is on, waiting for its key
+	local COLOR_OFF = Color3.fromRGB(78, 78, 85)     -- module is off
 
 	return function(ctx)
 		local page = ctx.pages["Settings"]
@@ -252,6 +251,7 @@ return function(lib)
 
 		-- ====================================================
 		-- keybind list (separate ScreenGui so it stays visible while the menu is hidden)
+		-- The top-left corner is the anchor: new rows are added below and the list never grows upwards.
 		-- ====================================================
 		local listGui = Instance.new("ScreenGui")
 		listGui.Name = "KeybindList"
@@ -263,17 +263,17 @@ return function(lib)
 
 		local listFrame = Instance.new("Frame")
 		listFrame.Name = "List"
-		listFrame.AnchorPoint = Vector2.new(0, 0.5)
-		listFrame.Position = UDim2.new(0, 16, 0.5, 0)
+		listFrame.AnchorPoint = Vector2.new(0, 0)
+		listFrame.Position = UDim2.new(0, 16, 0.5, -110) -- middle left, top edge fixed
 		listFrame.Size = UDim2.fromOffset(LIST_W, 0)
 		listFrame.AutomaticSize = Enum.AutomaticSize.Y
 		listFrame.BackgroundColor3 = LIST_BG
-		listFrame.BackgroundTransparency = 0.06
+		listFrame.BackgroundTransparency = 0.1
 		listFrame.BorderSizePixel = 0
 		listFrame.Active = true
 		listFrame.Visible = false
 		listFrame.Parent = listGui
-		addCorner(listFrame, 6)
+		addCorner(listFrame, 3)
 		local listStroke = addStroke(listFrame, LIST_STROKE_IDLE)
 
 		local listLayout = Instance.new("UIListLayout")
@@ -281,10 +281,10 @@ return function(lib)
 		listLayout.Parent = listFrame
 
 		local listPad = Instance.new("UIPadding")
-		listPad.PaddingBottom = UDim.new(0, 5)
+		listPad.PaddingBottom = UDim.new(0, 4)
 		listPad.Parent = listFrame
 
-		-- header
+		-- header: plain title + a thin line
 		do
 			local header = Instance.new("Frame")
 			header.Name = "Header"
@@ -293,50 +293,29 @@ return function(lib)
 			header.Size = UDim2.new(1, 0, 0, HEADER_H)
 			header.Parent = listFrame
 
-			local accent = Instance.new("Frame")
-			accent.AnchorPoint = Vector2.new(0, 0.5)
-			accent.Position = UDim2.new(0, 10, 0.5, 0)
-			accent.Size = UDim2.fromOffset(3, 12)
-			accent.BackgroundColor3 = Color3.fromRGB(230, 230, 236)
-			accent.BorderSizePixel = 0
-			accent.Parent = header
-			addCorner(accent, 2)
-
 			local title = Instance.new("TextLabel")
 			title.BackgroundTransparency = 1
-			title.Position = UDim2.fromOffset(20, 0)
-			title.Size = UDim2.new(1, -30, 1, 0)
-			title.Font = Enum.Font.GothamBold
-			title.Text = "KEYBINDS"
-			title.TextColor3 = Color3.fromRGB(150, 150, 158)
-			title.TextSize = 11
+			title.Position = UDim2.fromOffset(8, 0)
+			title.Size = UDim2.new(1, -16, 1, 0)
+			title.Font = Enum.Font.GothamMedium
+			title.Text = "Keybinds"
+			title.TextColor3 = Color3.fromRGB(205, 205, 210)
+			title.TextSize = 12
 			title.TextXAlignment = Enum.TextXAlignment.Left
 			title.Parent = header
 
 			local line = Instance.new("Frame")
 			line.AnchorPoint = Vector2.new(0, 1)
-			line.Position = UDim2.new(0, 10, 1, 0)
-			line.Size = UDim2.new(1, -20, 0, 1)
-			line.BackgroundColor3 = Color3.fromRGB(38, 38, 42)
+			line.Position = UDim2.new(0, 0, 1, 0)
+			line.Size = UDim2.new(1, 0, 0, 1)
+			line.BackgroundColor3 = Color3.fromRGB(40, 40, 44)
 			line.BorderSizePixel = 0
 			line.Parent = header
 		end
 
-		local emptyLabel = Instance.new("TextLabel")
-		emptyLabel.Name = "Empty"
-		emptyLabel.LayoutOrder = 1000
-		emptyLabel.BackgroundTransparency = 1
-		emptyLabel.Size = UDim2.new(1, 0, 0, ROW_H)
-		emptyLabel.Font = Enum.Font.GothamMedium
-		emptyLabel.Text = "Nothing enabled"
-		emptyLabel.TextColor3 = NAME_DIM
-		emptyLabel.TextSize = 12
-		emptyLabel.Parent = listFrame
-
-		-- one row per registered module
-		local entries = {} -- every module shown in the list (registered ones + scanned ones)
+		local entries = {} -- every module in the list (registered ones + scanned ones)
 		local known = {}
-		local rows = {} -- [index] = {frame, name, chip, shown, active, key}
+		local rows = {} -- [index] = {name, key, state, keyText}
 
 		local function addEntry(e)
 			if not known[e] then
@@ -435,75 +414,54 @@ return function(lib)
 			end
 		end
 
+		-- one line per module: name on the left, [key] on the right
 		local function makeRow(entry, order)
-			local frame = Instance.new("CanvasGroup")
+			local frame = Instance.new("Frame")
 			frame.Name = entry.name
 			frame.LayoutOrder = order
 			frame.BackgroundTransparency = 1
 			frame.BorderSizePixel = 0
 			frame.Size = UDim2.new(1, 0, 0, ROW_H)
-			frame.GroupTransparency = 1
-			frame.Visible = false
 			frame.Parent = listFrame
 
 			local name = Instance.new("TextLabel")
 			name.BackgroundTransparency = 1
-			name.Position = UDim2.fromOffset(10, 0)
-			name.Size = UDim2.new(1, -62, 1, 0)
-			name.Font = Enum.Font.GothamMedium
+			name.Position = UDim2.fromOffset(8, 0)
+			name.Size = UDim2.new(1, -52, 1, 0)
+			name.Font = Enum.Font.Gotham
 			name.Text = entry.name
-			name.TextColor3 = NAME_ON
-			name.TextSize = 13
+			name.TextColor3 = COLOR_OFF
+			name.TextSize = 12
 			name.TextXAlignment = Enum.TextXAlignment.Left
 			name.TextTruncate = Enum.TextTruncate.AtEnd
 			name.Parent = frame
 
-			-- key chip on the far right (grows with the text)
-			local chip = Instance.new("TextLabel")
-			chip.AnchorPoint = Vector2.new(1, 0.5)
-			chip.Position = UDim2.new(1, -8, 0.5, 0)
-			chip.Size = UDim2.fromOffset(0, 18)
-			chip.AutomaticSize = Enum.AutomaticSize.X
-			chip.BackgroundColor3 = Color3.fromRGB(36, 36, 41)
-			chip.BorderSizePixel = 0
-			chip.Font = Enum.Font.GothamMedium
-			chip.Text = ""
-			chip.TextColor3 = CHIP_ON
-			chip.TextSize = 11
-			chip.Visible = false
-			chip.Parent = frame
-			addCorner(chip, 4)
-			addStroke(chip, Color3.fromRGB(60, 60, 66))
-			local chipPad = Instance.new("UIPadding")
-			chipPad.PaddingLeft = UDim.new(0, 7)
-			chipPad.PaddingRight = UDim.new(0, 7)
-			chipPad.Parent = chip
+			local key = Instance.new("TextLabel")
+			key.AnchorPoint = Vector2.new(1, 0)
+			key.Position = UDim2.new(1, -8, 0, 0)
+			key.Size = UDim2.new(0, 44, 1, 0)
+			key.BackgroundTransparency = 1
+			key.Font = Enum.Font.Gotham
+			key.Text = ""
+			key.TextColor3 = COLOR_OFF
+			key.TextSize = 12
+			key.TextXAlignment = Enum.TextXAlignment.Right
+			key.Parent = frame
 
-			return {frame = frame, name = name, chip = chip, shown = false, active = true, key = nil}
+			return {name = name, key = key, state = "off", keyText = nil}
 		end
 
-		local rowInfo = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+		local STATE_COLORS = {on = COLOR_ON, wait = COLOR_WAIT, off = COLOR_OFF}
+		local rowInfo = TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 
-		local function setRowShown(r, shown)
-			r.shown = shown
-			if shown then
-				r.frame.Visible = true
-				TweenService:Create(r.frame, rowInfo, {GroupTransparency = 0}):Play()
-			else
-				local tween = TweenService:Create(r.frame, rowInfo, {GroupTransparency = 1})
-				tween.Completed:Connect(function()
-					if not r.shown then
-						r.frame.Visible = false
-					end
-				end)
-				tween:Play()
+		local function setRowState(r, state)
+			if r.state == state then
+				return
 			end
-		end
-
-		local function setRowActive(r, active)
-			r.active = active
-			TweenService:Create(r.name, rowInfo, {TextColor3 = active and NAME_ON or NAME_DIM}):Play()
-			TweenService:Create(r.chip, rowInfo, {TextColor3 = active and CHIP_ON or CHIP_DIM}):Play()
+			r.state = state
+			local c = STATE_COLORS[state]
+			TweenService:Create(r.name, rowInfo, {TextColor3 = c}):Play()
+			TweenService:Create(r.key, rowInfo, {TextColor3 = c}):Play()
 		end
 
 		local scanTimer = 0
@@ -519,7 +477,6 @@ return function(lib)
 				scanPages()
 			end
 
-			local anyShown = false
 			for i, entry in ipairs(entries) do
 				local r = rows[i]
 				if not r then
@@ -530,37 +487,32 @@ return function(lib)
 				local okE, enabled = pcall(entry.getEnabled)
 				enabled = okE and enabled and true or false
 
-				-- dimmed while the switch is on but the module still waits for its key
-				local active = enabled
-				if enabled and entry.getActive then
-					local okA, a = pcall(entry.getActive)
-					active = okA and a and true or false
+				-- on and running = bright, on but waiting for its key = grey, off = dark
+				local state = "off"
+				if enabled then
+					state = "on"
+					if entry.getActive then
+						local okA, a = pcall(entry.getActive)
+						if okA and not a then
+							state = "wait"
+						end
+					end
 				end
+				setRowState(r, state)
 
+				-- the key is shown for every module, also while it is off
 				local key = nil
-				if enabled and entry.getKey then
+				if entry.getKey then
 					local okK, k = pcall(entry.getKey)
 					key = okK and k or nil
 				end
-
-				if enabled ~= r.shown then
-					setRowShown(r, enabled)
-				end
-				if key ~= r.key then
-					r.key = key
-					r.chip.Text = key or ""
-					r.chip.Visible = key ~= nil
-				end
-				if enabled and active ~= r.active then
-					setRowActive(r, active)
-				end
-				if enabled then
-					anyShown = true
+				if key ~= r.keyText then
+					r.keyText = key
+					r.key.Text = key and ("[" .. key .. "]") or ""
 				end
 			end
 
-			listFrame.Visible = listWanted
-			emptyLabel.Visible = not anyShown
+			listFrame.Visible = listWanted and #entries > 0
 
 			-- the border brightens while the list can be moved (menu open)
 			local movable = win.gui.Enabled
