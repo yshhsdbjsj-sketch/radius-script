@@ -217,8 +217,8 @@ return function(lib)
 			UseMouseMoveRel = true, -- false = turn the camera instead
 			Sticky = true, -- stay locked on one player until they die / leave / you release the key
 			PredictionEnabled = true,
-			PredX = 4, -- 1 - 20, higher = more prediction (horizontal)
-			PredY = 4, -- 1 - 20, higher = more prediction (vertical)
+			PredX = 6, -- 1 - 20, higher = more prediction (horizontal)
+			PredY = 6, -- 1 - 20, higher = more prediction (vertical)
 			SmoothX = 15, -- 1 - 100, higher = smoother / slower (horizontal)
 			SmoothY = 15, -- 1 - 100, higher = smoother / slower (vertical)
 			Priority = {}, -- usernames that are always targeted first
@@ -860,9 +860,9 @@ return function(lib)
 				-- smoothed velocity so a noisy replicated velocity doesn't shake the aim
 				local vel = target.AssemblyLinearVelocity
 				smoothVel = smoothVel and smoothVel:Lerp(vel, math.clamp(dt * 12, 0, 1)) or vel
-				local k = dist / 1000
-				position += cf.RightVector * smoothVel:Dot(cf.RightVector) * cfg.PredX * k
-					+ cf.UpVector * smoothVel:Dot(cf.UpVector) * cfg.PredY * k
+				-- X / Y of 1-20 = 0.01s - 0.20s of lead time (normal prediction values)
+				position += cf.RightVector * smoothVel:Dot(cf.RightVector) * cfg.PredX / 100
+					+ cf.UpVector * smoothVel:Dot(cf.UpVector) * cfg.PredY / 100
 			end
 
 			local ax, ay = blend(cfg.SmoothX, dt), blend(cfg.SmoothY, dt)
@@ -884,8 +884,9 @@ return function(lib)
 					mousemoverel_(mx, my)
 				end
 			else
-				local cy, cp = cf:ToOrientation()
-				local gy, gp = CFrame.lookAt(cf.Position, position):ToOrientation()
+				-- ToOrientation returns pitch, yaw, roll (in that order)
+				local cp, cy = cf:ToOrientation()
+				local gp, gy = CFrame.lookAt(cf.Position, position):ToOrientation()
 				local dyaw = (gy - cy + math.pi) % (2 * math.pi) - math.pi
 				camera.CFrame = CFrame.new(cf.Position) * CFrame.fromOrientation(cp + (gp - cp) * ay, cy + dyaw * ax, 0)
 			end
