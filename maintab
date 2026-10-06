@@ -1,16 +1,30 @@
 -- maintab module (Main page): horizontal sub-tabs  AimBot | Silent | Trigger
--- usage in the main script:
+-- usage in the main script (unchanged):
 --   local buildMainTab = loadstring(game:HttpGet(MAINTAB_URL))()(lib)
 --   local mainTabs = buildMainTab({pages = pages, fadeInfo = fadeInfo, slideInfo = slideInfo})
 --
+-- AimBot : the Universal Aimbot logic (mouse / camera aim, fov circle, team + visible check,
+--          prediction, whitelist friends) with a UI for every setting.
+-- Trigger: the trigger bot from the same script (delay, clicks/sec, spam, aim-key only).
+-- Silent : empty page, ready for content.
+--
 -- returns:
---   mainTabs.Pages.AimBot / .Silent / .Trigger  -> empty CanvasGroups, put your content in them
---   mainTabs.Select("Silent")                   -> switch sub-tab from code
+--   mainTabs.Pages.AimBot / .Silent / .Trigger  -> the sub-pages
+--   mainTabs.Select("Trigger")                  -> switch sub-tab from code
 --   mainTabs.Current()                          -> name of the open sub-tab
+--   mainTabs.Config                             -> live settings table (cfg.Enabled, cfg.Strength, ...)
+--
+-- Not ported from the original script: the Aim Assist mode, the crosshair and the
+-- game specific shims (Phantom Forces, Bad Business, Rush Point, Arsenal, MM2).
 
 return function(lib)
+	local Players = lib.Players
 	local TweenService = lib.TweenService
+	local RunService = lib.RunService
+	local UserInputService = lib.UserInputService
+	local win = lib.win
 	local addCorner, addStroke = lib.addCorner, lib.addStroke
+	local TEXT_MAIN = lib.TEXT_MAIN
 
 	local SUBTABS = {"AimBot", "Silent", "Trigger"}
 
@@ -18,16 +32,44 @@ return function(lib)
 	local BAR_STROKE = Color3.fromRGB(42, 42, 47)
 	local TAB_IDLE = Color3.fromRGB(140, 140, 146)
 	local TAB_HOVER = Color3.fromRGB(200, 200, 206)
-	local TAB_ACTIVE = lib.TEXT_MAIN
+	local TAB_ACTIVE = TEXT_MAIN
+
+	local CARD_BG = Color3.fromRGB(28, 28, 32)
+	local CARD_STROKE = Color3.fromRGB(42, 42, 47)
+	local FIELD_STROKE = Color3.fromRGB(46, 46, 51)
+	local TEXT_SOFT = Color3.fromRGB(190, 190, 196)
+	local ON_TRACK = Color3.fromRGB(225, 225, 232)
+	local OFF_TRACK = Color3.fromRGB(44, 44, 50)
+	local ON_KNOB = Color3.fromRGB(22, 22, 25)
+	local OFF_KNOB = Color3.fromRGB(140, 140, 146)
+	local SEL_BG = Color3.fromRGB(48, 48, 55)
+	local SEL_STROKE = Color3.fromRGB(120, 120, 130)
 
 	local BAR_TOP, BAR_H = 62, 34
 	local PAGES_TOP = BAR_TOP + BAR_H + 10
+
+	local METHODS_H, SLIDER_H, SWITCH_H, KEY_H = 36, 46, 36, 38
+
+	local SHORT_KEYS = {
+		LeftControl = "LCtrl", RightControl = "RCtrl",
+		LeftShift = "LShift", RightShift = "RShift",
+		LeftAlt = "LAlt", RightAlt = "RAlt",
+		Return = "Enter", Backquote = "`",
+		MouseButton2 = "Mouse 2", MouseButton3 = "Mouse 3",
+	}
 
 	return function(ctx)
 		local page = ctx.pages["Main"]
 		local slideInfo = ctx.slideInfo
 		local fadeInfo = ctx.fadeInfo
 		local n = #SUBTABS
+
+		local player = Players.LocalPlayer
+		local Mouse = player:GetMouse()
+		local camera = workspace.CurrentCamera
+
+		local connections = {}
+		local destroyed = false
 
 		-- ====================================================
 		-- horizontal tab bar
@@ -42,7 +84,6 @@ return function(lib)
 		addCorner(bar)
 		addStroke(bar, BAR_STROKE)
 
-		-- highlight that slides behind the selected tab (same look as the sidebar one)
 		local highlight = Instance.new("Frame")
 		highlight.Name = "Highlight"
 		highlight.Position = UDim2.new(0, 3, 0, 3)
@@ -62,9 +103,6 @@ return function(lib)
 		strokeGradient.Color = ColorSequence.new(Color3.fromRGB(74, 74, 83), Color3.fromRGB(45, 45, 50))
 		strokeGradient.Parent = highlightStroke
 
-		-- ====================================================
-		-- sub-pages
-		-- ====================================================
 		local holder = Instance.new("Frame")
 		holder.Name = "SubPages"
 		holder.BackgroundTransparency = 1
@@ -92,7 +130,6 @@ return function(lib)
 				}):Play()
 			end
 
-			-- cross-fade: the old sub-page drifts up and fades out, the new one rises in
 			for pageName, sub in pairs(subPages) do
 				if pageName == name then
 					sub.Visible = true
@@ -162,10 +199,1003 @@ return function(lib)
 			subPages[name] = sub
 		end
 
+		-- ====================================================
+		-- settings (same names as the original Universal Aimbot)
+		-- ====================================================
+		local cfg = {
+			Enabled = false,
+			TeamCheck = true,
+			VisibleCheck = true,
+			IgnoreTransparency = true,
+			IgnoredTransparency = 0.5, -- parts more transparent than this don't block the visible check
+			RefreshRate = 10, -- milliseconds between aim updates
+			Keybind = "MouseButton2",
+			AimType = "Hold", -- "Hold" or "Toggle"
+			MaximumDistance = 300,
+			AlwaysActive = false,
+			TargetPart = "Head", -- "Head" or "Body"
+			AimAtNearestPart = false,
+			UseMouseMoveRel = true, -- false = turn the camera instead
+			Strength = 100, -- 1% - 200%
+			FovEnabled = true,
+			FovRadius = 100,
+			FovDynamic = true,
+			PredictionEnabled = false,
+			PredictionStrength = 2,
+			WhitelistFriends = true,
+			Priority = {}, -- usernames that are always targeted first
+			Whitelisted = {}, -- usernames / user ids that are never targeted
+			Ignore = {}, -- extra instances the visible check ray should ignore
+			Trigger = {
+				Enabled = false,
+				Delay = 60, -- milliseconds before the first click
+				Spam = true, -- click over and over (semi-auto weapons)
+				ClicksPerSecond = 10,
+				UseKeybind = false, -- only while the aim key is held
+			},
+		}
+		local trig = cfg.Trigger
+
+		if workspace:FindFirstChild("Ignore") then
+			table.insert(cfg.Ignore, workspace.Ignore)
+		elseif workspace:FindFirstChild("RaycastIgnore") then
+			table.insert(cfg.Ignore, workspace.RaycastIgnore)
+		end
+
+		-- ====================================================
+		-- ui building blocks
+		-- ====================================================
+		local dragFn
+		local listeningEntry -- keybind row waiting for a key
+
+		local function isPress(input)
+			return input.UserInputType == Enum.UserInputType.MouseButton1
+				or input.UserInputType == Enum.UserInputType.Touch
+		end
+
+		local function keyLabel(name)
+			return SHORT_KEYS[name] or name
+		end
+
+		local function newScroll(parent)
+			local scroll = Instance.new("ScrollingFrame")
+			scroll.BackgroundTransparency = 1
+			scroll.BorderSizePixel = 0
+			scroll.Position = UDim2.fromOffset(14, 0)
+			scroll.Size = UDim2.new(1, -28, 1, -6)
+			scroll.CanvasSize = UDim2.new()
+			scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+			scroll.ScrollingDirection = Enum.ScrollingDirection.Y
+			scroll.ScrollBarThickness = 3
+			scroll.ScrollBarImageColor3 = Color3.fromRGB(90, 90, 98)
+			scroll.Parent = parent
+
+			local layout = Instance.new("UIListLayout")
+			layout.Padding = UDim.new(0, 8)
+			layout.SortOrder = Enum.SortOrder.LayoutOrder
+			layout.Parent = scroll
+
+			local pad = Instance.new("UIPadding")
+			pad.PaddingRight = UDim.new(0, 6)
+			pad.PaddingBottom = UDim.new(0, 6)
+			pad.Parent = scroll
+			return scroll
+		end
+
+		local function newCard(scroll, order)
+			local card = Instance.new("Frame")
+			card.LayoutOrder = order
+			card.Size = UDim2.new(1, 0, 0, 0)
+			card.AutomaticSize = Enum.AutomaticSize.Y
+			card.BackgroundColor3 = CARD_BG
+			card.BorderSizePixel = 0
+			card.Parent = scroll
+			addCorner(card)
+			addStroke(card, CARD_STROKE)
+
+			local list = Instance.new("UIListLayout")
+			list.SortOrder = Enum.SortOrder.LayoutOrder
+			list.Parent = card
+			return card
+		end
+
+		-- collapsible settings area: starts shut, slides + fades open when its switch is on
+		local function newOptions(card, order)
+			local group = Instance.new("CanvasGroup")
+			group.Name = "Options"
+			group.LayoutOrder = order
+			group.BackgroundTransparency = 1
+			group.BorderSizePixel = 0
+			group.Size = UDim2.new(1, 0, 0, 0)
+			group.GroupTransparency = 1
+			group.Visible = false
+			group.Parent = card
+
+			local list = Instance.new("UIListLayout")
+			list.SortOrder = Enum.SortOrder.LayoutOrder
+			list.Parent = group
+
+			local divRow = Instance.new("Frame")
+			divRow.LayoutOrder = 0
+			divRow.BackgroundTransparency = 1
+			divRow.Size = UDim2.new(1, 0, 0, 1)
+			divRow.Parent = group
+			local divLine = Instance.new("Frame")
+			divLine.Position = UDim2.fromOffset(14, 0)
+			divLine.Size = UDim2.new(1, -28, 1, 0)
+			divLine.BackgroundColor3 = Color3.fromRGB(38, 38, 42)
+			divLine.BorderSizePixel = 0
+			divLine.Parent = divRow
+
+			local opts = {group = group, height = 1, open = false}
+
+			function opts.setOpen(open, animate)
+				opts.open = open
+				local info = TweenInfo.new(animate and 0.32 or 0, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+				if open then
+					group.Visible = true
+					TweenService:Create(group, info, {
+						Size = UDim2.new(1, 0, 0, opts.height),
+						GroupTransparency = 0,
+					}):Play()
+				else
+					local tween = TweenService:Create(group, info, {
+						Size = UDim2.new(1, 0, 0, 0),
+						GroupTransparency = 1,
+					})
+					tween.Completed:Connect(function()
+						if not opts.open then
+							group.Visible = false
+						end
+					end)
+					tween:Play()
+				end
+			end
+			return opts
+		end
+
+		-- rounded switch, anchored to the right edge of `parent`
+		local function makeSwitch(parent, initial, onChange)
+			local state = initial and true or false
+
+			local switch = Instance.new("TextButton")
+			switch.Name = "Switch"
+			switch.AnchorPoint = Vector2.new(1, 0.5)
+			switch.Position = UDim2.new(1, -10, 0.5, 0)
+			switch.Size = UDim2.fromOffset(42, 22)
+			switch.AutoButtonColor = false
+			switch.Text = ""
+			switch.BorderSizePixel = 0
+			switch.Parent = parent
+			addCorner(switch, 7)
+			local switchStroke = addStroke(switch, Color3.fromRGB(60, 60, 66))
+
+			local knob = Instance.new("Frame")
+			knob.AnchorPoint = Vector2.new(0, 0.5)
+			knob.Size = UDim2.fromOffset(16, 16)
+			knob.BorderSizePixel = 0
+			knob.Parent = switch
+			addCorner(knob, 5)
+
+			local function apply(animate)
+				local info = animate and fadeInfo or TweenInfo.new(0)
+				TweenService:Create(switch, info, {BackgroundColor3 = state and ON_TRACK or OFF_TRACK}):Play()
+				TweenService:Create(knob, info, {
+					BackgroundColor3 = state and ON_KNOB or OFF_KNOB,
+					Position = UDim2.new(0, state and 23 or 3, 0.5, 0),
+				}):Play()
+			end
+			apply(false)
+
+			switch.MouseEnter:Connect(function()
+				TweenService:Create(switchStroke, fadeInfo, {Color = Color3.fromRGB(110, 110, 120)}):Play()
+			end)
+			switch.MouseLeave:Connect(function()
+				TweenService:Create(switchStroke, fadeInfo, {Color = Color3.fromRGB(60, 60, 66)}):Play()
+			end)
+			switch.MouseButton1Click:Connect(function()
+				state = not state
+				apply(true)
+				onChange(state)
+			end)
+		end
+
+		local function makeLabel(parent, text, height)
+			local label = Instance.new("TextLabel")
+			label.BackgroundTransparency = 1
+			label.Position = UDim2.fromOffset(14, 0)
+			label.Size = UDim2.new(1, -(14 + 62), 0, height)
+			label.Font = Enum.Font.GothamMedium
+			label.Text = text
+			label.TextColor3 = TEXT_MAIN
+			label.TextSize = 13
+			label.TextXAlignment = Enum.TextXAlignment.Left
+			label.TextTruncate = Enum.TextTruncate.AtEnd
+			label.Parent = parent
+			return label
+		end
+
+		-- card header: title + switch
+		local function addHeader(card, title, initial, onChange)
+			local row = Instance.new("Frame")
+			row.LayoutOrder = 1
+			row.BackgroundTransparency = 1
+			row.Size = UDim2.new(1, 0, 0, 40)
+			row.Parent = card
+			makeLabel(row, title, 40)
+			makeSwitch(row, initial, onChange)
+		end
+
+		-- switch row inside a card's options
+		local function addSwitchRow(parent, order, title, initial, onChange)
+			local row = Instance.new("Frame")
+			row.LayoutOrder = order
+			row.BackgroundTransparency = 1
+			row.Size = UDim2.new(1, 0, 0, SWITCH_H)
+			row.Parent = parent
+			local label = makeLabel(row, title, SWITCH_H)
+			label.TextColor3 = TEXT_SOFT
+			label.TextSize = 12
+			makeSwitch(row, initial, onChange)
+		end
+
+		-- segmented selector
+		local function addSegmented(parent, order, options, default, onChange)
+			local row = Instance.new("Frame")
+			row.LayoutOrder = order
+			row.BackgroundTransparency = 1
+			row.Size = UDim2.new(1, 0, 0, METHODS_H)
+			row.Parent = parent
+
+			local holderFrame = Instance.new("Frame")
+			holderFrame.BackgroundTransparency = 1
+			holderFrame.Position = UDim2.fromOffset(14, 5)
+			holderFrame.Size = UDim2.new(1, -28, 0, 26)
+			holderFrame.Parent = row
+
+			local layout = Instance.new("UIListLayout")
+			layout.FillDirection = Enum.FillDirection.Horizontal
+			layout.Padding = UDim.new(0, 6)
+			layout.SortOrder = Enum.SortOrder.LayoutOrder
+			layout.Parent = holderFrame
+
+			local selected = default
+			local segButtons, segStrokes = {}, {}
+			local count = #options
+
+			local function refresh(animate)
+				local info = animate and fadeInfo or TweenInfo.new(0)
+				for name, btn in pairs(segButtons) do
+					local sel = name == selected
+					TweenService:Create(btn, info, {
+						BackgroundColor3 = sel and SEL_BG or CARD_BG,
+						TextColor3 = sel and TEXT_MAIN or TEXT_SOFT,
+					}):Play()
+					TweenService:Create(segStrokes[name], info, {Color = sel and SEL_STROKE or FIELD_STROKE}):Play()
+				end
+			end
+
+			for i, name in ipairs(options) do
+				local btn = Instance.new("TextButton")
+				btn.Name = name
+				btn.LayoutOrder = i
+				btn.Size = UDim2.new(1 / count, -6 * (count - 1) / count, 1, 0)
+				btn.BackgroundColor3 = CARD_BG
+				btn.BorderSizePixel = 0
+				btn.AutoButtonColor = false
+				btn.Font = Enum.Font.GothamMedium
+				btn.Text = name
+				btn.TextColor3 = TEXT_SOFT
+				btn.TextSize = 12
+				btn.Parent = holderFrame
+				addCorner(btn)
+				segStrokes[name] = addStroke(btn, FIELD_STROKE)
+				segButtons[name] = btn
+
+				btn.MouseButton1Click:Connect(function()
+					selected = name
+					refresh(true)
+					onChange(name)
+				end)
+			end
+			refresh(false)
+		end
+
+		-- slider with a value read-out
+		local function addSlider(parent, order, title, min, max, default, suffix, onChange)
+			local row = Instance.new("Frame")
+			row.LayoutOrder = order
+			row.BackgroundTransparency = 1
+			row.Size = UDim2.new(1, 0, 0, SLIDER_H)
+			row.Parent = parent
+
+			local titleLabel = Instance.new("TextLabel")
+			titleLabel.BackgroundTransparency = 1
+			titleLabel.Position = UDim2.fromOffset(14, 6)
+			titleLabel.Size = UDim2.new(0.5, -14, 0, 16)
+			titleLabel.Font = Enum.Font.GothamMedium
+			titleLabel.Text = title
+			titleLabel.TextColor3 = TEXT_SOFT
+			titleLabel.TextSize = 12
+			titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+			titleLabel.Parent = row
+
+			local valueLabel = Instance.new("TextLabel")
+			valueLabel.BackgroundTransparency = 1
+			valueLabel.AnchorPoint = Vector2.new(1, 0)
+			valueLabel.Position = UDim2.new(1, -14, 0, 6)
+			valueLabel.Size = UDim2.new(0.5, -14, 0, 16)
+			valueLabel.Font = Enum.Font.GothamMedium
+			valueLabel.TextColor3 = TEXT_MAIN
+			valueLabel.TextSize = 12
+			valueLabel.TextXAlignment = Enum.TextXAlignment.Right
+			valueLabel.Parent = row
+
+			local track = Instance.new("Frame")
+			track.Position = UDim2.fromOffset(14, 30)
+			track.Size = UDim2.new(1, -28, 0, 6)
+			track.BackgroundColor3 = OFF_TRACK
+			track.BorderSizePixel = 0
+			track.Parent = row
+			addCorner(track, 1000)
+
+			local fill = Instance.new("Frame")
+			fill.Size = UDim2.fromScale(0, 1)
+			fill.BackgroundColor3 = ON_TRACK
+			fill.BorderSizePixel = 0
+			fill.Parent = track
+			addCorner(fill, 1000)
+
+			local thumb = Instance.new("Frame")
+			thumb.AnchorPoint = Vector2.new(0.5, 0.5)
+			thumb.Size = UDim2.fromOffset(12, 12)
+			thumb.BackgroundColor3 = Color3.fromRGB(245, 245, 248)
+			thumb.BorderSizePixel = 0
+			thumb.ZIndex = 3
+			thumb.Parent = track
+			addCorner(thumb, 1000)
+
+			local hit = Instance.new("TextButton")
+			hit.Position = UDim2.fromOffset(14, 22)
+			hit.Size = UDim2.new(1, -28, 0, 22)
+			hit.BackgroundTransparency = 1
+			hit.AutoButtonColor = false
+			hit.Text = ""
+			hit.ZIndex = 5
+			hit.Parent = row
+
+			local function setValue(v, fire)
+				v = math.clamp(math.floor(v + 0.5), min, max)
+				local pct = (v - min) / (max - min)
+				fill.Size = UDim2.fromScale(pct, 1)
+				thumb.Position = UDim2.fromScale(pct, 0.5)
+				valueLabel.Text = tostring(v) .. (suffix or "")
+				if fire then
+					onChange(v)
+				end
+			end
+			setValue(default, false)
+
+			hit.InputBegan:Connect(function(input)
+				if isPress(input) then
+					dragFn = function()
+						local m = UserInputService:GetMouseLocation()
+						local ap, as = track.AbsolutePosition, track.AbsoluteSize
+						setValue(min + math.clamp((m.X - ap.X) / as.X, 0, 1) * (max - min), true)
+					end
+					dragFn()
+				end
+			end)
+		end
+
+		-- keybind row: click, then press a key (or Mouse 2 / Mouse 3). Escape cancels.
+		local function addKeyRow(parent, order, title, initial, onBind)
+			local row = Instance.new("Frame")
+			row.LayoutOrder = order
+			row.BackgroundTransparency = 1
+			row.Size = UDim2.new(1, 0, 0, KEY_H)
+			row.Parent = parent
+
+			local label = makeLabel(row, title, KEY_H)
+			label.TextColor3 = TEXT_SOFT
+			label.TextSize = 12
+			label.Size = UDim2.new(1, -(14 + 110), 0, KEY_H)
+
+			local btn = Instance.new("TextButton")
+			btn.AnchorPoint = Vector2.new(1, 0.5)
+			btn.Position = UDim2.new(1, -10, 0.5, 0)
+			btn.Size = UDim2.fromOffset(96, 22)
+			btn.BackgroundColor3 = Color3.fromRGB(36, 36, 41)
+			btn.BorderSizePixel = 0
+			btn.AutoButtonColor = false
+			btn.Font = Enum.Font.GothamMedium
+			btn.TextColor3 = Color3.fromRGB(215, 215, 220)
+			btn.TextSize = 11
+			btn.TextTruncate = Enum.TextTruncate.AtEnd
+			btn.Parent = row
+			addCorner(btn, 6)
+			local stroke = addStroke(btn, Color3.fromRGB(60, 60, 66))
+
+			local value = initial
+			local entry = {}
+			function entry.render()
+				local waiting = listeningEntry == entry
+				btn.Text = waiting and "press a key..." or keyLabel(value)
+				TweenService:Create(stroke, fadeInfo, {
+					Color = waiting and Color3.fromRGB(225, 225, 232) or Color3.fromRGB(60, 60, 66),
+				}):Play()
+			end
+			function entry.set(name)
+				value = name
+				onBind(name)
+			end
+			entry.render()
+
+			btn.MouseButton1Click:Connect(function()
+				local previous = listeningEntry
+				listeningEntry = entry
+				if previous and previous ~= entry then
+					previous.render()
+				end
+				entry.render()
+			end)
+		end
+
+		-- ====================================================
+		-- aimbot engine (ported from Universal Aimbot v1.1.20)
+		-- ====================================================
+		local mousemoverel_ = mousemoverel
+		local mouse1press_ = mouse1press or mouse1down
+		local mouse1release_ = mouse1release or mouse1up
+		local hasDrawing = typeof(Drawing) == "table" or (Drawing ~= nil and Drawing.new ~= nil)
+
+		local BODY = {}
+		for _, partName in ipairs({
+			"Head", "UpperTorso", "LowerTorso", "LeftUpperArm", "LeftLowerArm", "LeftHand",
+			"RightUpperArm", "RightLowerArm", "RightHand", "LeftUpperLeg", "LeftLowerLeg", "LeftFoot",
+			"RightUpperLeg", "RightLowerLeg", "RightFoot",
+			"Torso", "Left Arm", "Right Arm", "Left Leg", "Right Leg",
+			"Chest", "Hips", "LeftArm", "LeftForearm", "RightArm", "RightForearm",
+			"LeftLeg", "LeftForeleg", "RightLeg", "RightForeleg",
+		}) do
+			BODY[partName] = true
+		end
+
+		local aiming = false
+		local mousedown = false
+		local triggering = false
+
+		local function isAlive(plr)
+			local char = plr.Character
+			local hum = char and char:FindFirstChildOfClass("Humanoid")
+			if hum and hum.Health > 0 then
+				return char
+			end
+			return nil
+		end
+
+		-- friends are looked up once in the background (IsFriendsWith yields)
+		local friendCache = {}
+		local function isFriend(plr)
+			local cached = friendCache[plr]
+			if cached == nil then
+				friendCache[plr] = false
+				task.spawn(function()
+					local ok, result = pcall(function()
+						return player:IsFriendsWith(plr.UserId)
+					end)
+					friendCache[plr] = ok and result or false
+				end)
+				return false
+			end
+			return cached
+		end
+
+		local function isWhitelisted(plr)
+			if table.find(cfg.Whitelisted, plr.Name) or table.find(cfg.Whitelisted, plr.UserId) then
+				return true
+			end
+			return cfg.WhitelistFriends and isFriend(plr)
+		end
+
+		local function fovRadius()
+			local radius = cfg.FovRadius
+			if cfg.FovDynamic then
+				radius = radius / (camera.FieldOfView / 80)
+			end
+			return radius
+		end
+
+		-- is any body part of the character inside the fov circle?
+		local function inFov(char)
+			if not cfg.FovEnabled then
+				return true
+			end
+			local mouseLoc = UserInputService:GetMouseLocation()
+			local radius = fovRadius()
+			for _, part in ipairs(char:GetChildren()) do
+				if BODY[part.Name] and part:IsA("BasePart") then
+					local v, onScreen = camera:WorldToViewportPoint(part.Position)
+					if onScreen and (Vector2.new(v.X, v.Y) - mouseLoc).Magnitude <= radius then
+						return true
+					end
+				end
+			end
+			return false
+		end
+
+		local function closestPlayer()
+			local mouseLoc = UserInputService:GetMouseLocation()
+
+			for _, name in ipairs(cfg.Priority) do
+				local plr = Players:FindFirstChild(name)
+				if plr and plr ~= player and isAlive(plr) and inFov(plr.Character) then
+					return plr
+				end
+			end
+
+			local myTeam = player.Team
+			local best, bestDist = nil, math.huge
+			for _, plr in ipairs(Players:GetPlayers()) do
+				if plr ~= player and isAlive(plr) and not isWhitelisted(plr) then
+					local v, onScreen = camera:WorldToViewportPoint(plr.Character:GetPivot().Position)
+					if onScreen then
+						local mag = (Vector2.new(v.X, v.Y) - mouseLoc).Magnitude
+						local team = plr.Team
+						local enemy = not cfg.TeamCheck or team == nil or team ~= myTeam
+						if enemy and mag < bestDist then
+							best, bestDist = plr, mag
+						end
+					end
+				end
+			end
+			return best
+		end
+
+		-- the part that gets aimed at
+		local function pickTarget(char)
+			if cfg.AimAtNearestPart then
+				local mouseLoc = UserInputService:GetMouseLocation()
+				local best, bestDist = nil, math.huge
+				for _, part in ipairs(char:GetChildren()) do
+					if BODY[part.Name] and part:IsA("BasePart") then
+						local v = camera:WorldToViewportPoint(part.Position)
+						local mag = (mouseLoc - Vector2.new(v.X, v.Y)).Magnitude
+						if mag < bestDist then
+							best, bestDist = part, mag
+						end
+					end
+				end
+				return best
+			end
+			if cfg.TargetPart == "Body" then
+				return char:FindFirstChild("UpperTorso") or char:FindFirstChild("Torso") or char:FindFirstChild("HumanoidRootPart")
+			end
+			return char:FindFirstChild("Head")
+		end
+
+		local rayParams = RaycastParams.new()
+		rayParams.FilterType = Enum.RaycastFilterType.Exclude
+		rayParams.IgnoreWater = true
+
+		-- ray from the camera to the target; transparent parts don't block it
+		local function isVisible(char, targetPart)
+			if not cfg.VisibleCheck then
+				return true
+			end
+			local origin = camera.CFrame.Position
+			local goal = targetPart.Position
+
+			local ignore = {camera}
+			if player.Character then
+				table.insert(ignore, player.Character)
+			end
+			for _, inst in ipairs(cfg.Ignore) do
+				table.insert(ignore, inst)
+			end
+
+			for _ = 1, 12 do
+				rayParams.FilterDescendantsInstances = ignore
+				local dir = goal - origin
+				local result = workspace:Raycast(origin, dir.Unit * (dir.Magnitude + 2), rayParams)
+				if not result then
+					return true
+				end
+				local hit = result.Instance
+				if hit:IsDescendantOf(char) then
+					return true
+				end
+				local model = hit:FindFirstAncestorOfClass("Model")
+				local isCharacter = model and model:FindFirstChildOfClass("Humanoid")
+				if cfg.IgnoreTransparency and hit.Transparency > cfg.IgnoredTransparency and not isCharacter then
+					table.insert(ignore, hit)
+				else
+					return false
+				end
+			end
+			return false
+		end
+
+		-- fov circle
+		local fovCircle
+		if hasDrawing then
+			fovCircle = Drawing.new("Circle")
+			fovCircle.Visible = false
+			fovCircle.Transparency = 1
+			fovCircle.Color = Color3.fromRGB(255, 255, 255)
+			fovCircle.Thickness = 1
+			fovCircle.NumSides = 64
+			fovCircle.Radius = cfg.FovRadius
+			fovCircle.Filled = false
+		end
+
+		local function updateFovCircle(mouseLoc)
+			if not fovCircle then
+				return
+			end
+			local show = cfg.Enabled and cfg.FovEnabled
+			fovCircle.Visible = show
+			if show then
+				fovCircle.Position = mouseLoc
+				fovCircle.Radius = fovRadius()
+			end
+		end
+
+		local lastUpdate = 0
+		local function aimStep()
+			if not cfg.Enabled or not (aiming or cfg.AlwaysActive) then
+				return
+			end
+			local now = os.clock()
+			if now - lastUpdate < math.max(cfg.RefreshRate, 0) / 1000 then
+				return
+			end
+			lastUpdate = now
+
+			local plr = closestPlayer()
+			if not plr then
+				return
+			end
+			local char = plr.Character
+			local camPos = camera.CFrame.Position
+			local dist = (camPos - char:GetPivot().Position).Magnitude
+			if dist > cfg.MaximumDistance then
+				return
+			end
+
+			local target = pickTarget(char)
+			if not target or not inFov(char) or not isVisible(char, target) then
+				return
+			end
+
+			local position = target.Position
+			if cfg.PredictionEnabled then
+				local strength = math.clamp(cfg.PredictionStrength, 1, 20) / 10
+				position += target.AssemblyLinearVelocity * strength * dist / 100
+			end
+
+			if cfg.UseMouseMoveRel and mousemoverel_ then
+				local mouseLoc = UserInputService:GetMouseLocation()
+				local v = camera:WorldToViewportPoint(position)
+				local strength = math.clamp(cfg.Strength, 1, 200) / 100
+				mousemoverel_((v.X - mouseLoc.X) * strength, (v.Y - mouseLoc.Y) * strength)
+			else
+				local goal = CFrame.new(camPos, position)
+				camera.CFrame = camera.CFrame:Lerp(goal, math.clamp(cfg.Strength / 100, 0, 1))
+			end
+		end
+
+		-- ====================================================
+		-- trigger bot
+		-- ====================================================
+		local function targetUnderMouse()
+			local part = Mouse.Target
+			if not part then
+				return nil
+			end
+			local model = part:FindFirstAncestorOfClass("Model")
+			local plr = model and Players:GetPlayerFromCharacter(model)
+			if not plr or plr == player or not isAlive(plr) or isWhitelisted(plr) then
+				return nil
+			end
+			if cfg.TeamCheck and plr.Team ~= nil and plr.Team == player.Team then
+				return nil
+			end
+			return plr
+		end
+
+		local function triggerStep()
+			if not trig.Enabled or triggering or mousedown then
+				return
+			end
+			if trig.UseKeybind and not aiming then
+				return
+			end
+			local plr = targetUnderMouse()
+			if not plr then
+				return
+			end
+
+			triggering = true
+			task.spawn(function()
+				if trig.Delay > 0 then
+					task.wait(trig.Delay / 1000)
+				end
+				local function stillOnTarget()
+					return trig.Enabled and not destroyed and targetUnderMouse() == plr
+				end
+				if not stillOnTarget() then
+					triggering = false
+					return
+				end
+
+				local interval = 1 / math.max(trig.ClicksPerSecond, 1)
+				if trig.Spam then
+					repeat
+						if mouse1press_ then mouse1press_() end
+						task.wait(0.02)
+						if mouse1release_ then mouse1release_() end
+						task.wait(interval)
+					until not stillOnTarget()
+				else
+					if mouse1press_ then mouse1press_() end
+					repeat
+						task.wait(0.03)
+					until not stillOnTarget()
+					if mouse1release_ then mouse1release_() end
+				end
+				triggering = false
+			end)
+		end
+
+		-- ====================================================
+		-- input + loops
+		-- ====================================================
+		local function keyMatches(input)
+			local bind = cfg.Keybind
+			if bind:find("Mouse") then
+				return input.UserInputType.Name == bind
+			end
+			return input.KeyCode.Name == bind
+		end
+
+		table.insert(connections, UserInputService.InputBegan:Connect(function(input, processed)
+			-- waiting for a new keybind
+			if listeningEntry then
+				local entry = listeningEntry
+				local name
+				if input.UserInputType == Enum.UserInputType.Keyboard then
+					if input.KeyCode == Enum.KeyCode.Escape then
+						listeningEntry = nil
+						entry.render()
+						return
+					end
+					name = input.KeyCode.Name
+				elseif input.UserInputType == Enum.UserInputType.MouseButton2
+					or input.UserInputType == Enum.UserInputType.MouseButton3 then
+					name = input.UserInputType.Name
+				else
+					return
+				end
+				listeningEntry = nil
+				entry.set(name)
+				entry.render()
+				return
+			end
+
+			if processed then
+				return
+			end
+			if keyMatches(input) then
+				if cfg.AimType == "Toggle" then
+					aiming = not aiming
+				else
+					aiming = true
+				end
+			end
+			if input.UserInputType == Enum.UserInputType.MouseButton1 then
+				mousedown = true
+			end
+		end))
+
+		table.insert(connections, UserInputService.InputEnded:Connect(function(input, processed)
+			if isPress(input) then
+				dragFn = nil
+			end
+			if processed then
+				return
+			end
+			if cfg.AimType == "Hold" and keyMatches(input) then
+				aiming = false
+			end
+			if input.UserInputType == Enum.UserInputType.MouseButton1 then
+				mousedown = false
+			end
+		end))
+
+		table.insert(connections, UserInputService.InputChanged:Connect(function(input)
+			if dragFn and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+				dragFn()
+			end
+		end))
+
+		table.insert(connections, RunService.RenderStepped:Connect(function()
+			camera = workspace.CurrentCamera or camera
+			updateFovCircle(UserInputService:GetMouseLocation())
+			aimStep()
+			triggerStep()
+		end))
+
+		table.insert(connections, Players.PlayerRemoving:Connect(function(plr)
+			friendCache[plr] = nil
+		end))
+
+		-- ====================================================
+		-- AimBot page
+		-- ====================================================
+		do
+			local scroll = newScroll(subPages.AimBot)
+			local order = 0
+			local function nextOrder()
+				order += 1
+				return order
+			end
+
+			-- Aimbot
+			do
+				local card = newCard(scroll, nextOrder())
+				local opts = newOptions(card, 2)
+				addHeader(card, "Aimbot", cfg.Enabled, function(v)
+					cfg.Enabled = v
+					opts.setOpen(v, true)
+				end)
+				addSegmented(opts.group, 1, {"Mouse", "Camera"}, "Mouse", function(name)
+					cfg.UseMouseMoveRel = name == "Mouse"
+				end)
+				addSegmented(opts.group, 2, {"Head", "Body", "Nearest"}, "Head", function(name)
+					cfg.AimAtNearestPart = name == "Nearest"
+					cfg.TargetPart = name == "Body" and "Body" or "Head"
+				end)
+				addSegmented(opts.group, 3, {"Hold", "Toggle"}, "Hold", function(name)
+					cfg.AimType = name
+					aiming = false
+				end)
+				addKeyRow(opts.group, 4, "Aim key", cfg.Keybind, function(name)
+					cfg.Keybind = name
+					aiming = false
+				end)
+				addSlider(opts.group, 5, "Strength", 1, 200, cfg.Strength, "%", function(v)
+					cfg.Strength = v
+				end)
+				addSlider(opts.group, 6, "Max distance", 50, 1000, cfg.MaximumDistance, "", function(v)
+					cfg.MaximumDistance = v
+				end)
+				addSwitchRow(opts.group, 7, "Always active", cfg.AlwaysActive, function(v)
+					cfg.AlwaysActive = v
+				end)
+				opts.height += METHODS_H * 3 + KEY_H + SLIDER_H * 2 + SWITCH_H
+				opts.setOpen(cfg.Enabled, false)
+			end
+
+			-- Team check
+			do
+				local card = newCard(scroll, nextOrder())
+				addHeader(card, "Team check", cfg.TeamCheck, function(v)
+					cfg.TeamCheck = v
+				end)
+			end
+
+			-- Visible check
+			do
+				local card = newCard(scroll, nextOrder())
+				local opts = newOptions(card, 2)
+				addHeader(card, "Visible check", cfg.VisibleCheck, function(v)
+					cfg.VisibleCheck = v
+					opts.setOpen(v, true)
+				end)
+				addSwitchRow(opts.group, 1, "Ignore transparent parts", cfg.IgnoreTransparency, function(v)
+					cfg.IgnoreTransparency = v
+				end)
+				opts.height += SWITCH_H
+				opts.setOpen(cfg.VisibleCheck, false)
+			end
+
+			-- Ignore friends
+			do
+				local card = newCard(scroll, nextOrder())
+				addHeader(card, "Ignore friends", cfg.WhitelistFriends, function(v)
+					cfg.WhitelistFriends = v
+				end)
+			end
+
+			-- FOV circle
+			do
+				local card = newCard(scroll, nextOrder())
+				local opts = newOptions(card, 2)
+				addHeader(card, "FOV circle", cfg.FovEnabled, function(v)
+					cfg.FovEnabled = v
+					opts.setOpen(v, true)
+				end)
+				addSlider(opts.group, 1, "Radius", 20, 600, cfg.FovRadius, "", function(v)
+					cfg.FovRadius = v
+				end)
+				addSwitchRow(opts.group, 2, "Scale with zoom", cfg.FovDynamic, function(v)
+					cfg.FovDynamic = v
+				end)
+				opts.height += SLIDER_H + SWITCH_H
+				opts.setOpen(cfg.FovEnabled, false)
+			end
+
+			-- Prediction
+			do
+				local card = newCard(scroll, nextOrder())
+				local opts = newOptions(card, 2)
+				addHeader(card, "Prediction", cfg.PredictionEnabled, function(v)
+					cfg.PredictionEnabled = v
+					opts.setOpen(v, true)
+				end)
+				addSlider(opts.group, 1, "Strength", 1, 20, cfg.PredictionStrength, "", function(v)
+					cfg.PredictionStrength = v
+				end)
+				opts.height += SLIDER_H
+				opts.setOpen(cfg.PredictionEnabled, false)
+			end
+		end
+
+		-- ====================================================
+		-- Trigger page
+		-- ====================================================
+		do
+			local scroll = newScroll(subPages.Trigger)
+			local card = newCard(scroll, 1)
+			local opts = newOptions(card, 2)
+			addHeader(card, "Trigger bot", trig.Enabled, function(v)
+				trig.Enabled = v
+				opts.setOpen(v, true)
+			end)
+			addSlider(opts.group, 1, "Delay", 0, 500, trig.Delay, " ms", function(v)
+				trig.Delay = v
+			end)
+			addSlider(opts.group, 2, "Clicks per second", 1, 37, trig.ClicksPerSecond, "", function(v)
+				trig.ClicksPerSecond = v
+			end)
+			addSwitchRow(opts.group, 3, "Spam (semi-auto)", trig.Spam, function(v)
+				trig.Spam = v
+			end)
+			addSwitchRow(opts.group, 4, "Only while aim key held", trig.UseKeybind, function(v)
+				trig.UseKeybind = v
+			end)
+			opts.height += SLIDER_H * 2 + SWITCH_H * 2
+			opts.setOpen(trig.Enabled, false)
+		end
+
+		-- ====================================================
+		-- cleanup
+		-- ====================================================
+		local function destroy()
+			if destroyed then
+				return
+			end
+			destroyed = true
+			cfg.Enabled = false
+			trig.Enabled = false
+			for _, conn in ipairs(connections) do
+				conn:Disconnect()
+			end
+			table.clear(connections)
+			if fovCircle then
+				pcall(function()
+					fovCircle:Remove()
+				end)
+			end
+		end
+		win.onClose(destroy)
+
 		selectSub(SUBTABS[1], false)
 
 		return {
 			Pages = subPages,
+			Config = cfg,
 			Select = function(name)
 				if table.find(SUBTABS, name) then
 					selectSub(name, true)
@@ -174,6 +1204,7 @@ return function(lib)
 			Current = function()
 				return current
 			end,
+			Destroy = destroy,
 		}
 	end
 end
