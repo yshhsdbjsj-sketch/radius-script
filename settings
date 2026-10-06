@@ -1,0 +1,528 @@
+-- settings tab module
+-- usage in the main script:
+--   local buildSettingsTab = loadstring(game:HttpGet(SETTINGS_URL))()(lib)
+--   buildSettingsTab({pages = pages, fadeInfo = fadeInfo, slideInfo = slideInfo, watermark = watermark})
+--
+-- Settings page:
+--   Menu toggle   keybind that shows / hides the whole menu
+--   Watermark     switch
+--   Keybind list  switch for the on-screen list
+--
+-- Keybind list (own ScreenGui, left side of the screen):
+--   * every module that is switched on shows up:   "No-Clip ............ [X]"
+--     - key set        -> name on the left, key on the far right
+--     - no key set     -> just the name ("Jump Power", "Gravity", ...)
+--     - waiting for its key (switch on, not toggled yet) -> shown dimmed
+--   * the whole Visuals tab is a single "ESP" entry (master switch + at least one ESP on)
+--   * while the menu is OPEN you can drag the list anywhere; while the menu is HIDDEN it stays
+--     where it is until you open the menu again
+--   * modules add themselves with lib.registerKeybind({name, getEnabled, getActive?, getKey?})
+
+return function(lib)
+	local Players = lib.Players
+	local TweenService = lib.TweenService
+	local RunService = lib.RunService
+	local UserInputService = lib.UserInputService
+	local win = lib.win
+	local addCorner, addStroke = lib.addCorner, lib.addStroke
+	local TEXT_MAIN = lib.TEXT_MAIN
+
+	local ROW_BG = Color3.fromRGB(28, 28, 32)
+	local ROW_STROKE = Color3.fromRGB(42, 42, 47)
+	local ON_TRACK = Color3.fromRGB(225, 225, 232)
+	local OFF_TRACK = Color3.fromRGB(44, 44, 50)
+	local ON_KNOB = Color3.fromRGB(22, 22, 25)
+	local OFF_KNOB = Color3.fromRGB(140, 140, 146)
+
+	-- keybind list look
+	local LIST_W, ROW_H, HEADER_H = 200, 24, 28
+	local LIST_BG = Color3.fromRGB(20, 20, 23)
+	local LIST_STROKE_IDLE = Color3.fromRGB(42, 42, 47)
+	local LIST_STROKE_MOVABLE = Color3.fromRGB(88, 88, 98)
+	local NAME_ON = Color3.fromRGB(245, 245, 248)
+	local NAME_DIM = Color3.fromRGB(125, 125, 132)
+	local CHIP_ON = Color3.fromRGB(225, 225, 232)
+	local CHIP_DIM = Color3.fromRGB(125, 125, 132)
+
+	return function(ctx)
+		local page = ctx.pages["Settings"]
+		local fadeInfo = ctx.fadeInfo
+		local watermark = ctx.watermark
+
+		local menuOpen = true
+		local watermarkWanted = true
+		local listWanted = true
+
+		-- ====================================================
+		-- page rows
+		-- ====================================================
+		local function newRow(name, y)
+			local row = Instance.new("Frame")
+			row.Name = name
+			row.Position = UDim2.fromOffset(20, y)
+			row.Size = UDim2.new(1, -40, 0, 48)
+			row.BackgroundColor3 = ROW_BG
+			row.BorderSizePixel = 0
+			row.Parent = page
+			addCorner(row)
+			addStroke(row, ROW_STROKE)
+
+			local label = Instance.new("TextLabel")
+			label.BackgroundTransparency = 1
+			label.Position = UDim2.fromOffset(16, 0)
+			label.Size = UDim2.new(0.5, 0, 1, 0)
+			label.Font = Enum.Font.GothamMedium
+			label.Text = name
+			label.TextColor3 = TEXT_MAIN
+			label.TextSize = 14
+			label.TextXAlignment = Enum.TextXAlignment.Left
+			label.Parent = row
+			return row, label
+		end
+
+		-- label + switch row
+		local function addSwitchRow(y, text, default, onChange)
+			local row, label = newRow(text, y)
+
+			local switch = Instance.new("TextButton")
+			switch.Name = "Switch"
+			switch.AnchorPoint = Vector2.new(1, 0.5)
+			switch.Position = UDim2.new(1, -12, 0.5, 0)
+			switch.Size = UDim2.fromOffset(46, 24)
+			switch.AutoButtonColor = false
+			switch.Text = ""
+			switch.BorderSizePixel = 0
+			switch.Parent = row
+			addCorner(switch, 7)
+			local switchStroke = addStroke(switch, Color3.fromRGB(60, 60, 66))
+
+			local knob = Instance.new("Frame")
+			knob.AnchorPoint = Vector2.new(0, 0.5)
+			knob.Size = UDim2.fromOffset(18, 18)
+			knob.BorderSizePixel = 0
+			knob.Parent = switch
+			addCorner(knob, 5)
+
+			local isOn = default
+			local function apply(animate)
+				local info = animate and fadeInfo or TweenInfo.new(0)
+				TweenService:Create(switch, info, {BackgroundColor3 = isOn and ON_TRACK or OFF_TRACK}):Play()
+				TweenService:Create(knob, info, {
+					BackgroundColor3 = isOn and ON_KNOB or OFF_KNOB,
+					Position = UDim2.new(0, isOn and 25 or 3, 0.5, 0),
+				}):Play()
+			end
+			apply(false)
+
+			switch.MouseEnter:Connect(function()
+				TweenService:Create(switchStroke, fadeInfo, {Color = Color3.fromRGB(110, 110, 120)}):Play()
+			end)
+			switch.MouseLeave:Connect(function()
+				TweenService:Create(switchStroke, fadeInfo, {Color = Color3.fromRGB(60, 60, 66)}):Play()
+			end)
+
+			local obj = {}
+			function obj.Set(value)
+				isOn = value and true or false
+				apply(true)
+				onChange(isOn)
+			end
+			switch.MouseButton1Click:Connect(function()
+				obj.Set(not isOn)
+			end)
+			return obj
+		end
+
+		-- ---------- Menu toggle (keybind) ----------
+		local beganConn, endedConn
+		do
+			local row = newRow("Menu toggle", 66)
+
+			local IDLE_STROKE = Color3.fromRGB(60, 60, 66)
+			local HOVER_STROKE = Color3.fromRGB(110, 110, 120)
+			local LISTEN_STROKE = Color3.fromRGB(225, 225, 232)
+
+			local keyBtn = Instance.new("TextButton")
+			keyBtn.Name = "MenuKeybind"
+			keyBtn.AnchorPoint = Vector2.new(1, 0.5)
+			keyBtn.Position = UDim2.new(1, -12, 0.5, 0)
+			keyBtn.Size = UDim2.fromOffset(110, 26)
+			keyBtn.BackgroundColor3 = Color3.fromRGB(36, 36, 41)
+			keyBtn.BorderSizePixel = 0
+			keyBtn.AutoButtonColor = false
+			keyBtn.Font = Enum.Font.GothamMedium
+			keyBtn.TextColor3 = Color3.fromRGB(215, 215, 220)
+			keyBtn.TextSize = 13
+			keyBtn.Parent = row
+			addCorner(keyBtn, 6)
+			local keyStroke = addStroke(keyBtn, IDLE_STROKE)
+
+			local bind = {key = Enum.KeyCode.Insert, ctrl = false, alt = false, shift = false}
+			local listening = false
+			local pendingMod
+
+			local MOD_KEYS = {
+				[Enum.KeyCode.LeftControl] = "LCtrl", [Enum.KeyCode.RightControl] = "RCtrl",
+				[Enum.KeyCode.LeftShift] = "LShift", [Enum.KeyCode.RightShift] = "RShift",
+				[Enum.KeyCode.LeftAlt] = "LAlt", [Enum.KeyCode.RightAlt] = "RAlt",
+			}
+
+			local function ctrlDown() return UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) or UserInputService:IsKeyDown(Enum.KeyCode.RightControl) end
+			local function shiftDown() return UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) or UserInputService:IsKeyDown(Enum.KeyCode.RightShift) end
+			local function altDown() return UserInputService:IsKeyDown(Enum.KeyCode.LeftAlt) or UserInputService:IsKeyDown(Enum.KeyCode.RightAlt) end
+
+			local function bindText()
+				local parts = {}
+				if bind.ctrl then table.insert(parts, "Ctrl") end
+				if bind.alt then table.insert(parts, "Alt") end
+				if bind.shift then table.insert(parts, "Shift") end
+				table.insert(parts, MOD_KEYS[bind.key] or bind.key.Name)
+				return table.concat(parts, " + ")
+			end
+
+			local function refresh()
+				keyBtn.Text = listening and "Press a key..." or bindText()
+				TweenService:Create(keyStroke, fadeInfo, {Color = listening and LISTEN_STROKE or IDLE_STROKE}):Play()
+			end
+			refresh()
+
+			local function finish(key, ctrl, alt, shift)
+				bind = {key = key, ctrl = ctrl, alt = alt, shift = shift}
+				listening = false
+				pendingMod = nil
+				refresh()
+			end
+
+			keyBtn.MouseEnter:Connect(function()
+				if not listening then TweenService:Create(keyStroke, fadeInfo, {Color = HOVER_STROKE}):Play() end
+			end)
+			keyBtn.MouseLeave:Connect(function()
+				if not listening then TweenService:Create(keyStroke, fadeInfo, {Color = IDLE_STROKE}):Play() end
+			end)
+			keyBtn.MouseButton1Click:Connect(function()
+				listening = true
+				pendingMod = nil
+				refresh()
+			end)
+
+			beganConn = UserInputService.InputBegan:Connect(function(input, processed)
+				if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+				local kc = input.KeyCode
+
+				if listening then
+					if kc == Enum.KeyCode.Escape then
+						listening = false
+						pendingMod = nil
+						refresh()
+					elseif MOD_KEYS[kc] then
+						pendingMod = kc
+					else
+						finish(kc, ctrlDown(), altDown(), shiftDown())
+					end
+					return
+				end
+
+				if processed or kc ~= bind.key then return end
+				if not MOD_KEYS[bind.key] then
+					if ctrlDown() ~= bind.ctrl or altDown() ~= bind.alt or shiftDown() ~= bind.shift then return end
+				end
+				menuOpen = not menuOpen
+				win.gui.Enabled = menuOpen
+				watermark.SetVisible(menuOpen and watermarkWanted)
+			end)
+
+			endedConn = UserInputService.InputEnded:Connect(function(input)
+				if listening and input.UserInputType == Enum.UserInputType.Keyboard and pendingMod and input.KeyCode == pendingMod then
+					finish(pendingMod, false, false, false)
+				end
+			end)
+		end
+
+		-- ---------- Watermark ----------
+		addSwitchRow(122, "Watermark", true, function(isOn)
+			watermarkWanted = isOn
+			watermark.SetVisible(isOn and menuOpen)
+		end)
+
+		-- ---------- Keybind list ----------
+		addSwitchRow(178, "Keybind list", true, function(isOn)
+			listWanted = isOn
+		end)
+
+		-- ====================================================
+		-- keybind list (separate ScreenGui so it stays visible while the menu is hidden)
+		-- ====================================================
+		local listGui = Instance.new("ScreenGui")
+		listGui.Name = "KeybindList"
+		listGui.ResetOnSpawn = false
+		listGui.IgnoreGuiInset = true
+		listGui.DisplayOrder = 5
+		listGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+		listGui.Parent = Players.LocalPlayer:WaitForChild("PlayerGui")
+
+		local listFrame = Instance.new("Frame")
+		listFrame.Name = "List"
+		listFrame.Position = UDim2.new(0, 16, 0.4, 0)
+		listFrame.Size = UDim2.fromOffset(LIST_W, 0)
+		listFrame.AutomaticSize = Enum.AutomaticSize.Y
+		listFrame.BackgroundColor3 = LIST_BG
+		listFrame.BackgroundTransparency = 0.06
+		listFrame.BorderSizePixel = 0
+		listFrame.Active = true
+		listFrame.Visible = false
+		listFrame.Parent = listGui
+		addCorner(listFrame, 6)
+		local listStroke = addStroke(listFrame, LIST_STROKE_IDLE)
+
+		local listLayout = Instance.new("UIListLayout")
+		listLayout.SortOrder = Enum.SortOrder.LayoutOrder
+		listLayout.Parent = listFrame
+
+		local listPad = Instance.new("UIPadding")
+		listPad.PaddingBottom = UDim.new(0, 5)
+		listPad.Parent = listFrame
+
+		-- header
+		do
+			local header = Instance.new("Frame")
+			header.Name = "Header"
+			header.LayoutOrder = 0
+			header.BackgroundTransparency = 1
+			header.Size = UDim2.new(1, 0, 0, HEADER_H)
+			header.Parent = listFrame
+
+			local accent = Instance.new("Frame")
+			accent.AnchorPoint = Vector2.new(0, 0.5)
+			accent.Position = UDim2.new(0, 10, 0.5, 0)
+			accent.Size = UDim2.fromOffset(3, 12)
+			accent.BackgroundColor3 = Color3.fromRGB(230, 230, 236)
+			accent.BorderSizePixel = 0
+			accent.Parent = header
+			addCorner(accent, 2)
+
+			local title = Instance.new("TextLabel")
+			title.BackgroundTransparency = 1
+			title.Position = UDim2.fromOffset(20, 0)
+			title.Size = UDim2.new(1, -30, 1, 0)
+			title.Font = Enum.Font.GothamBold
+			title.Text = "KEYBINDS"
+			title.TextColor3 = Color3.fromRGB(150, 150, 158)
+			title.TextSize = 11
+			title.TextXAlignment = Enum.TextXAlignment.Left
+			title.Parent = header
+
+			local line = Instance.new("Frame")
+			line.AnchorPoint = Vector2.new(0, 1)
+			line.Position = UDim2.new(0, 10, 1, 0)
+			line.Size = UDim2.new(1, -20, 0, 1)
+			line.BackgroundColor3 = Color3.fromRGB(38, 38, 42)
+			line.BorderSizePixel = 0
+			line.Parent = header
+		end
+
+		-- one row per registered module
+		local entries = lib.keybindEntries or {}
+		local rows = {} -- [index] = {frame, name, chip, shown, active, key}
+
+		local function makeRow(entry, order)
+			local frame = Instance.new("CanvasGroup")
+			frame.Name = entry.name
+			frame.LayoutOrder = order
+			frame.BackgroundTransparency = 1
+			frame.BorderSizePixel = 0
+			frame.Size = UDim2.new(1, 0, 0, ROW_H)
+			frame.GroupTransparency = 1
+			frame.Visible = false
+			frame.Parent = listFrame
+
+			local name = Instance.new("TextLabel")
+			name.BackgroundTransparency = 1
+			name.Position = UDim2.fromOffset(10, 0)
+			name.Size = UDim2.new(1, -62, 1, 0)
+			name.Font = Enum.Font.GothamMedium
+			name.Text = entry.name
+			name.TextColor3 = NAME_ON
+			name.TextSize = 13
+			name.TextXAlignment = Enum.TextXAlignment.Left
+			name.TextTruncate = Enum.TextTruncate.AtEnd
+			name.Parent = frame
+
+			-- key chip on the far right (grows with the text)
+			local chip = Instance.new("TextLabel")
+			chip.AnchorPoint = Vector2.new(1, 0.5)
+			chip.Position = UDim2.new(1, -8, 0.5, 0)
+			chip.Size = UDim2.fromOffset(0, 18)
+			chip.AutomaticSize = Enum.AutomaticSize.X
+			chip.BackgroundColor3 = Color3.fromRGB(36, 36, 41)
+			chip.BorderSizePixel = 0
+			chip.Font = Enum.Font.GothamMedium
+			chip.Text = ""
+			chip.TextColor3 = CHIP_ON
+			chip.TextSize = 11
+			chip.Visible = false
+			chip.Parent = frame
+			addCorner(chip, 4)
+			addStroke(chip, Color3.fromRGB(60, 60, 66))
+			local chipPad = Instance.new("UIPadding")
+			chipPad.PaddingLeft = UDim.new(0, 7)
+			chipPad.PaddingRight = UDim.new(0, 7)
+			chipPad.Parent = chip
+
+			return {frame = frame, name = name, chip = chip, shown = false, active = true, key = nil}
+		end
+
+		local rowInfo = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+
+		local function setRowShown(r, shown)
+			r.shown = shown
+			if shown then
+				r.frame.Visible = true
+				TweenService:Create(r.frame, rowInfo, {GroupTransparency = 0}):Play()
+			else
+				local tween = TweenService:Create(r.frame, rowInfo, {GroupTransparency = 1})
+				tween.Completed:Connect(function()
+					if not r.shown then
+						r.frame.Visible = false
+					end
+				end)
+				tween:Play()
+			end
+		end
+
+		local function setRowActive(r, active)
+			r.active = active
+			TweenService:Create(r.name, rowInfo, {TextColor3 = active and NAME_ON or NAME_DIM}):Play()
+			TweenService:Create(r.chip, rowInfo, {TextColor3 = active and CHIP_ON or CHIP_DIM}):Play()
+		end
+
+		local function updateList()
+			local anyShown = false
+			for i, entry in ipairs(entries) do
+				local r = rows[i]
+				if not r then
+					r = makeRow(entry, i)
+					rows[i] = r
+				end
+
+				local okE, enabled = pcall(entry.getEnabled)
+				enabled = okE and enabled and true or false
+
+				-- dimmed while the switch is on but the module still waits for its key
+				local active = enabled
+				if enabled and entry.getActive then
+					local okA, a = pcall(entry.getActive)
+					active = okA and a and true or false
+				end
+
+				local key = nil
+				if enabled and entry.getKey then
+					local okK, k = pcall(entry.getKey)
+					key = okK and k or nil
+				end
+
+				if enabled ~= r.shown then
+					setRowShown(r, enabled)
+				end
+				if key ~= r.key then
+					r.key = key
+					r.chip.Text = key or ""
+					r.chip.Visible = key ~= nil
+				end
+				if enabled and active ~= r.active then
+					setRowActive(r, active)
+				end
+				if enabled then
+					anyShown = true
+				end
+			end
+
+			listFrame.Visible = listWanted and anyShown
+
+			-- the border brightens while the list can be moved (menu open)
+			local movable = win.gui.Enabled
+			if listFrame:GetAttribute("Movable") ~= movable then
+				listFrame:SetAttribute("Movable", movable)
+				TweenService:Create(listStroke, fadeInfo, {Color = movable and LIST_STROKE_MOVABLE or LIST_STROKE_IDLE}):Play()
+			end
+		end
+
+		-- ---------- dragging (only while the main menu is open) ----------
+		local dragging = false
+		local dragMouse, dragPos, dragAbs
+
+		local inputConn = listFrame.InputBegan:Connect(function(input)
+			if not win.gui.Enabled then
+				return -- menu hidden: the list is stuck
+			end
+			if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+				dragging = true
+				dragMouse = UserInputService:GetMouseLocation()
+				dragPos = listFrame.Position
+				dragAbs = listFrame.AbsolutePosition
+				input.Changed:Connect(function()
+					if input.UserInputState == Enum.UserInputState.End then
+						dragging = false
+					end
+				end)
+			end
+		end)
+
+		local moveConn = UserInputService.InputChanged:Connect(function(input)
+			if not dragging then
+				return
+			end
+			if not win.gui.Enabled then
+				dragging = false
+				return
+			end
+			if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+				local delta = UserInputService:GetMouseLocation() - dragMouse
+				local screen, size = listGui.AbsoluteSize, listFrame.AbsoluteSize
+				local loX, loY = -dragAbs.X, -dragAbs.Y
+				local hiX = math.max(loX, screen.X - size.X - dragAbs.X)
+				local hiY = math.max(loY, screen.Y - size.Y - dragAbs.Y)
+				local dx = math.clamp(delta.X, loX, hiX)
+				local dy = math.clamp(delta.Y, loY, hiY)
+				listFrame.Position = UDim2.new(
+					dragPos.X.Scale, dragPos.X.Offset + dx,
+					dragPos.Y.Scale, dragPos.Y.Offset + dy
+				)
+			end
+		end)
+
+		-- keep the list on screen when the window is resized / the list grows at the bottom
+		local function fitOnScreen()
+			local p, s, screen = listFrame.AbsolutePosition, listFrame.AbsoluteSize, listGui.AbsoluteSize
+			local dx = math.clamp(p.X, 0, math.max(0, screen.X - s.X)) - p.X
+			local dy = math.clamp(p.Y, 0, math.max(0, screen.Y - s.Y)) - p.Y
+			if dx ~= 0 or dy ~= 0 then
+				listFrame.Position += UDim2.fromOffset(dx, dy)
+			end
+		end
+		local sizeConn = listGui:GetPropertyChangedSignal("AbsoluteSize"):Connect(fitOnScreen)
+		local growConn = listFrame:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+			if not dragging then
+				fitOnScreen()
+			end
+		end)
+
+		local heartbeatConn = RunService.Heartbeat:Connect(updateList)
+
+		win.onClose(function()
+			heartbeatConn:Disconnect()
+			inputConn:Disconnect()
+			moveConn:Disconnect()
+			sizeConn:Disconnect()
+			growConn:Disconnect()
+			beganConn:Disconnect()
+			endedConn:Disconnect()
+			listGui:Destroy()
+		end)
+
+		return {
+			SetKeybindList = function(value)
+				listWanted = value and true or false
+			end,
+		}
+	end
+end
