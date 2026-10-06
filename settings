@@ -6,9 +6,9 @@
 -- Settings page:
 --   Menu toggle   keybind that shows / hides the whole menu
 --   Watermark     switch
---   Keybind list  switch for the on-screen list
+--   Keybind list  switch for the on-screen list (off when the script starts)
 --
--- Keybind list (own ScreenGui, left side of the screen):
+-- Keybind list (own ScreenGui, middle left of the screen, visible while its switch is on):
 --   * every module that is switched on shows up:   "No-Clip ............ [X]"
 --     - key set        -> name on the left, key on the far right
 --     - no key set     -> just the name ("Jump Power", "Gravity", ...)
@@ -51,7 +51,7 @@ return function(lib)
 
 		local menuOpen = true
 		local watermarkWanted = true
-		local listWanted = true
+		local listWanted = false -- off until the "Keybind list" switch is turned on
 
 		-- ====================================================
 		-- page rows
@@ -245,7 +245,7 @@ return function(lib)
 		end)
 
 		-- ---------- Keybind list ----------
-		addSwitchRow(178, "Keybind list", true, function(isOn)
+		addSwitchRow(178, "Keybind list", false, function(isOn)
 			listWanted = isOn
 		end)
 
@@ -262,7 +262,8 @@ return function(lib)
 
 		local listFrame = Instance.new("Frame")
 		listFrame.Name = "List"
-		listFrame.Position = UDim2.new(0, 16, 0.4, 0)
+		listFrame.AnchorPoint = Vector2.new(0, 0.5)
+		listFrame.Position = UDim2.new(0, 16, 0.5, 0)
 		listFrame.Size = UDim2.fromOffset(LIST_W, 0)
 		listFrame.AutomaticSize = Enum.AutomaticSize.Y
 		listFrame.BackgroundColor3 = LIST_BG
@@ -319,6 +320,17 @@ return function(lib)
 			line.BorderSizePixel = 0
 			line.Parent = header
 		end
+
+		local emptyLabel = Instance.new("TextLabel")
+		emptyLabel.Name = "Empty"
+		emptyLabel.LayoutOrder = 1000
+		emptyLabel.BackgroundTransparency = 1
+		emptyLabel.Size = UDim2.new(1, 0, 0, ROW_H)
+		emptyLabel.Font = Enum.Font.GothamMedium
+		emptyLabel.Text = "Nothing enabled"
+		emptyLabel.TextColor3 = NAME_DIM
+		emptyLabel.TextSize = 12
+		emptyLabel.Parent = listFrame
 
 		-- one row per registered module
 		local entries = lib.keybindEntries or {}
@@ -436,7 +448,8 @@ return function(lib)
 				end
 			end
 
-			listFrame.Visible = listWanted and anyShown
+			listFrame.Visible = listWanted
+			emptyLabel.Visible = not anyShown
 
 			-- the border brightens while the list can be moved (menu open)
 			local movable = win.gui.Enabled
