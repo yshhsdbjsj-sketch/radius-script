@@ -12,14 +12,21 @@
 --   Card 2 (one switch per feature - turning one on opens its settings window under the menu):
 --     Box Esp         style (Full / Corners / 3D), color + alpha
 --     Box Fill        filled box behind the player, color + alpha
+--     Chams           Highlight on the character: style (Fill / Outline / Both), through walls, colors
 --     Name Esp        source (Display / Username / Both), font, color + alpha
 --     Health Bar      mode (Solid / Gradient), Full / Mid / Low colors
+--     Armor Bar       blue bar on the right side of the box (BodyEffects.Armor), color + alpha
 --     Health Text     number or percent next to the health bar, font, color + alpha
 --     Skeleton Esp    color + alpha, thickness
+--     Head Dot        circle on the head (outline / filled), color + alpha
+--     Look Direction  line from the head showing where the player is facing, color + alpha
 --     Tracers         line from the screen to every player, origin, color + alpha
+--     Off-screen Arrows  arrows around the crosshair pointing at players outside the screen
 --     Distance Text   distance under the player, font, color + alpha
 --     Weapon Text     the tool the player holds, under the player, font, color + alpha
 --     Team Colors     one color for teammates, one for enemies (or the Roblox team color)
+--
+-- distance fade is always on: everything fades out smoothly as a player gets close to the render distance
 --
 -- text layout:
 --   * Distance Text alone                 -> distance under the player
@@ -28,8 +35,10 @@
 --   * both on and Name Esp off            -> weapon under the player, distance below it
 --
 -- behaviour:
---   * while the menu is OPEN the features only show on the 3D avatar preview
+--   * while the menu is OPEN the features show on the 3D avatar preview
+--     (Chams and Off-screen Arrows have no preview - Roblox doesn't render Highlights in viewports)
 --   * when the menu is HIDDEN (menu toggle key) they draw on every player that passes the checks
+--   * Off-screen Arrows ignore the Visible check (they exist to point at players you can't see)
 --   * the preview and the real ESP always use the same colors and styles
 
 return function(lib)
@@ -50,6 +59,11 @@ return function(lib)
 	local HP_SEGS = 16 -- gradient resolution of the health bar
 	local HP_W = 3     -- health bar width in pixels
 	local LINE_H = 14  -- height of one text line under the player
+	local ARMOR_MAX = 130 -- armor value that counts as a full bar
+	local LOOK_LEN = 6    -- studs the look-direction line reaches in front of the head
+
+	local ARROW_SIZE = {Small = 9, Medium = 13, Large = 18}
+	local ARROW_RADIUS = {Near = 0.22, Mid = 0.34, Far = 0.44} -- fraction of the smaller screen side
 
 	local R15_PARTS = {
 		"Head", "UpperTorso", "LowerTorso",
@@ -157,6 +171,16 @@ return function(lib)
 		return tool and tool.Name or nil
 	end
 
+	-- armor of the character as 0-1 (nil = this game / character has no armor value)
+	local function armorFrac(char)
+		local effects = char:FindFirstChild("BodyEffects")
+		local armor = effects and effects:FindFirstChild("Armor")
+		if armor and (armor:IsA("NumberValue") or armor:IsA("IntValue")) then
+			return math.clamp(armor.Value / ARMOR_MAX, 0, 1)
+		end
+		return nil
+	end
+
 	-- ========================================================
 	-- geometry: characters -> line segments / bounds
 	-- (used by both the Drawing ESP and the GUI preview)
@@ -170,6 +194,7 @@ return function(lib)
 		bones[i] = {0, 0, 0, 0}
 	end
 	local tracerSeg = {{0, 0, 0, 0}} -- the single tracer line
+	local lookSeg = {{0, 0, 0, 0}}   -- the single look-direction line
 
 	local function setSeg(i, ax, ay, bx, by)
 		local s = segs[i]
@@ -200,7 +225,7 @@ return function(lib)
 		end
 	end
 
-	-- screen-space bounds of every body part (shared by 2D box, fill, name, health, texts)
+	-- screen-space bounds of every body part (shared by 2D box, fill, name, health, armor, texts)
 	local bnd = {minX = 0, minY = 0, maxX = 0, maxY = 0}
 
 	local function computeBounds(char, project)
@@ -365,6 +390,64 @@ return function(lib)
 		return 1
 	end
 
+	-- head circle: returns x, y, radius (nil = head not on screen)
+	local function computeHead(char, project)
+		local head = char:FindFirstChild("Head")
+		if not head then
+			return nil
+		end
+		local x, y, visible = project(head.Position)
+		if not visible then
+			return nil
+		end
+		local _, ty, topVisible = project(head.Position + Vector3.new(0, head.Size.Y / 2, 0))
+		local r = topVisible and math.abs(ty - y) or 3
+		return x, y, math.max(r, 2.5)
+	end
+
+	-- fills `lookSeg` (head -> a point in front of the head), returns 1 or 0
+	local function computeLook(char, project)
+		local head = char:FindFirstChild("Head")
+		if not head then
+			return 0
+		end
+		local from = head.Position
+		local to = from + head.CFrame.LookVector * LOOK_LEN
+		local ax, ay, av = project(from)
+		local bx, by, bv = project(to)
+		if not (av and bv) then
+			return 0
+		end
+		local s = lookSeg[1]
+		s[1], s[2], s[3], s[4] = ax, ay, bx, by
+		return 1
+	end
+
+	-- triangle that sits on a ring around the screen center and points at `worldPos`.
+	-- returns the three corner points (tip first), or nil while the player is on screen
+	local function computeArrow(camera, worldPos, vs, size, ringFrac)
+		local sp, onScreen = camera:WorldToViewportPoint(worldPos)
+		if onScreen and sp.X >= 0 and sp.X <= vs.X and sp.Y >= 0 and sp.Y <= vs.Y then
+			return nil
+		end
+		-- direction in camera space also works for players behind you
+		local rel = camera.CFrame:PointToObjectSpace(worldPos)
+		local dx, dy = rel.X, -rel.Y
+		local mag = math.sqrt(dx * dx + dy * dy)
+		if mag < 1e-4 then
+			dx, dy, mag = 0, 1, 1
+		end
+		dx, dy = dx / mag, dy / mag
+
+		local ring = math.min(vs.X, vs.Y) * ringFrac
+		local cx, cy = vs.X / 2 + dx * ring, vs.Y / 2 + dy * ring
+		local px, py = -dy, dx -- perpendicular to the pointing direction
+		local bx, by = cx - dx * size * 0.6, cy - dy * size * 0.6
+		return cx + dx * size, cy + dy * size,
+			bx + px * size * 0.7, by + py * size * 0.7,
+			bx - px * size * 0.7, by - py * size * 0.7
+	end
+
 	return function(ctx)
 		local page = ctx.pages["Visuals"]
 		local fadeInfo = ctx.fadeInfo
@@ -380,11 +463,16 @@ return function(lib)
 		local DIST_MIN, DIST_MAX, DIST_STEP = 50, 5000, 50
 		local renderDist = 1500
 
-		local FEATURES = {"Box", "BoxFill", "Name", "Health", "HealthText", "Skeleton", "Tracers", "Distance", "Weapon", "TeamColors"}
+		local FEATURES = {
+			"Box", "BoxFill", "Chams", "Name", "Health", "Armor", "HealthText", "Skeleton",
+			"HeadDot", "LookDir", "Tracers", "Arrows", "Distance", "Weapon", "TeamColors",
+		}
 		local LABELS = {
-			Box = "Box Esp", BoxFill = "Box Fill", Name = "Name Esp", Health = "Health Bar",
-			HealthText = "Health Text", Skeleton = "Skeleton Esp", Tracers = "Tracers",
-			Distance = "Distance Text", Weapon = "Weapon Text", TeamColors = "Team Colors",
+			Box = "Box Esp", BoxFill = "Box Fill", Chams = "Chams", Name = "Name Esp",
+			Health = "Health Bar", Armor = "Armor Bar", HealthText = "Health Text",
+			Skeleton = "Skeleton Esp", HeadDot = "Head Dot", LookDir = "Look Direction",
+			Tracers = "Tracers", Arrows = "Off-screen Arrows", Distance = "Distance Text",
+			Weapon = "Weapon Text", TeamColors = "Team Colors",
 		}
 		local feat = {}
 		for _, key in ipairs(FEATURES) do
@@ -399,6 +487,11 @@ return function(lib)
 		local skelThick = 1           -- Skeleton line thickness
 		local tracerFrom = "Bottom"   -- Tracers: Bottom / Center / Top / Mouse
 		local teamSource = "Custom"   -- Team colors: Custom / Roblox
+		local headStyle = "Outline"   -- Head dot: Outline / Filled
+		local chamStyle = "Both"      -- Chams: Fill / Outline / Both
+		local chamWalls = "On"        -- Chams through walls: On / Off
+		local arrowSize = "Medium"    -- Arrows: Small / Medium / Large
+		local arrowRadius = "Mid"     -- Arrows: Near / Mid / Far
 		local fonts = {Name = "UI", HealthText = "UI", Distance = "UI", Weapon = "UI"}
 
 		-- color slots: h/s/v (0-1) + a (1 = opaque, 0 = invisible)
@@ -422,6 +515,13 @@ return function(lib)
 			hpFull = newSlot(Color3.fromRGB(60, 220, 90)),
 			hpMid = newSlot(Color3.fromRGB(240, 210, 60)),
 			hpLow = newSlot(Color3.fromRGB(235, 60, 60)),
+			armor = newSlot(Color3.fromRGB(70, 140, 255)),
+			head = newSlot(Color3.fromRGB(255, 255, 255)),
+			look = newSlot(Color3.fromRGB(255, 255, 255)),
+			arrow = newSlot(Color3.fromRGB(255, 255, 255)),
+			-- chams: a soft fill with a clean light outline
+			chamFill = newSlot(Color3.fromRGB(190, 190, 200), 0.35),
+			chamOutline = newSlot(Color3.fromRGB(255, 255, 255), 0.9),
 			ally = newSlot(Color3.fromRGB(80, 200, 120)),
 			enemy = newSlot(Color3.fromRGB(235, 70, 70)),
 		}
@@ -447,14 +547,28 @@ return function(lib)
 		end
 
 		local function anyOn()
-			return feat.Box or feat.BoxFill or feat.Name or feat.Health or feat.HealthText
-				or feat.Skeleton or feat.Tracers or feat.Distance or feat.Weapon
+			for _, key in ipairs(FEATURES) do
+				if key ~= "TeamColors" and feat[key] then
+					return true
+				end
+			end
+			return false
 		end
 
 		-- features that need the screen-space bounds of the player
 		local function needsBounds()
-			return feat.BoxFill or feat.Name or feat.Health or feat.HealthText or feat.Distance or feat.Weapon
+			return feat.BoxFill or feat.Name or feat.Health or feat.Armor or feat.HealthText or feat.Distance or feat.Weapon
 				or (feat.Box and style ~= "3D")
+		end
+
+		-- distance fade (always on): full strength up close, fading to 20% at the render distance
+		local curFade = 1 -- fade of the player that is being drawn right now
+		local function fadeFor(dist)
+			local start = renderDist * 0.35
+			if dist <= start then
+				return 1
+			end
+			return 1 - 0.8 * math.clamp((dist - start) / math.max(renderDist - start, 1), 0, 1)
 		end
 
 		-- set to true if your executor's Drawing Transparency is reversed (0 = opaque)
@@ -1206,7 +1320,7 @@ return function(lib)
 
 		local function noop() end
 
-		-- small color dots on choice buttons (health Full/Mid/Low, team Ally/Enemy)
+		-- small color dots on choice buttons (health Full/Mid/Low, team Ally/Enemy, chams Fill/Outline)
 		local dotList = {}
 		local function addDot(button, slotKey)
 			local dot = Instance.new("Frame")
@@ -1252,6 +1366,28 @@ return function(lib)
 		fillPicker.Bind(slots.fill)
 		smallLabel(fillPanel, "COLOR", 226, 42)
 
+		-- ---------- Chams panel ----------
+		local CHAM_STYLES = {"Fill", "Outline", "Both"}
+		local CHAM_STOPS = {Fill = "chamFill", Outline = "chamOutline"}
+		local chamsPanel = newPanel("Chams", 214, "CHAMS")
+		local chamsPicker = makePicker(chamsPanel, true, 150, 226, 186, refreshDots)
+		chamsPicker.Bind(slots.chamFill)
+		smallLabel(chamsPanel, "STYLE", 226, 42)
+		local chamStyleChoice = makeChoice(chamsPanel, 226, 60, CHAM_STYLES, chamStyle, function(name)
+			chamStyle = name
+		end)
+		smallLabel(chamsPanel, "THROUGH WALLS", 226, 90)
+		local chamWallsChoice = makeChoice(chamsPanel, 226, 108, {"On", "Off"}, chamWalls, function(name)
+			chamWalls = name
+		end)
+		smallLabel(chamsPanel, "COLORS", 226, 138)
+		local chamStopChoice = makeChoice(chamsPanel, 226, 156, {"Fill", "Outline"}, "Fill", function(name)
+			chamsPicker.Bind(slots[CHAM_STOPS[name]])
+		end)
+		for name, btn in pairs(chamStopChoice.buttons) do
+			addDot(btn, CHAM_STOPS[name])
+		end
+
 		-- ---------- Name Esp panel ----------
 		local NAME_SOURCES = {"Display", "Username", "Both"}
 		local namePanel = newPanel("Name", 190, "NAME ESP")
@@ -1281,6 +1417,12 @@ return function(lib)
 			addDot(btn, HP_STOPS[name])
 		end
 
+		-- ---------- Armor bar panel ----------
+		local armorPanel = newPanel("Armor", 150, "ARMOR BAR")
+		local armorPicker = makePicker(armorPanel, true, 92, 226, 60, noop)
+		armorPicker.Bind(slots.armor)
+		smallLabel(armorPanel, "COLOR", 226, 42)
+
 		-- ---------- Health text panel ----------
 		local HP_FORMATS = {"Number", "Percent"}
 		local hpTextPanel = newPanel("HealthText", 190, "HEALTH TEXT")
@@ -1304,6 +1446,23 @@ return function(lib)
 			skelThick = THICKNESSES[name]
 		end)
 
+		-- ---------- Head dot panel ----------
+		local HEAD_STYLES = {"Outline", "Filled"}
+		local headPanel = newPanel("HeadDot", 150, "HEAD DOT")
+		local headPicker = makePicker(headPanel, true, 92, 226, 110, noop)
+		headPicker.Bind(slots.head)
+		smallLabel(headPanel, "STYLE", 226, 42)
+		local headStyleChoice = makeChoice(headPanel, 226, 60, HEAD_STYLES, headStyle, function(name)
+			headStyle = name
+		end)
+		smallLabel(headPanel, "COLOR", 226, 94)
+
+		-- ---------- Look direction panel ----------
+		local lookPanel = newPanel("LookDir", 150, "LOOK DIRECTION")
+		local lookPicker = makePicker(lookPanel, true, 92, 226, 60, noop)
+		lookPicker.Bind(slots.look)
+		smallLabel(lookPanel, "COLOR", 226, 42)
+
 		-- ---------- Tracers panel ----------
 		local TRACER_ORIGINS = {"Bottom", "Center", "Top", "Mouse"}
 		local trcPanel = newPanel("Tracers", 150, "TRACERS")
@@ -1314,6 +1473,21 @@ return function(lib)
 			tracerFrom = name
 		end)
 		smallLabel(trcPanel, "COLOR", 226, 94)
+
+		-- ---------- Off-screen arrows panel ----------
+		local ARROW_SIZES = {"Small", "Medium", "Large"}
+		local ARROW_RADII = {"Near", "Mid", "Far"}
+		local arrowPanel = newPanel("Arrows", 180, "OFF-SCREEN ARROWS")
+		local arrowPicker = makePicker(arrowPanel, true, 122, 226, 142, noop)
+		arrowPicker.Bind(slots.arrow)
+		smallLabel(arrowPanel, "SIZE", 226, 42)
+		local arrowSizeChoice = makeChoice(arrowPanel, 226, 60, ARROW_SIZES, arrowSize, function(name)
+			arrowSize = name
+		end)
+		smallLabel(arrowPanel, "DISTANCE FROM CENTER", 226, 90)
+		local arrowRadiusChoice = makeChoice(arrowPanel, 226, 108, ARROW_RADII, arrowRadius, function(name)
+			arrowRadius = name
+		end)
 
 		-- ---------- Distance text panel ----------
 		local distPanel = newPanel("Distance", 150, "DISTANCE TEXT")
@@ -1349,11 +1523,16 @@ return function(lib)
 		local function refreshAllPickers()
 			boxPicker.Refresh()
 			fillPicker.Refresh()
+			chamsPicker.Refresh()
 			namePicker.Refresh()
 			healthPicker.Refresh()
+			armorPicker.Refresh()
 			hpTextPicker.Refresh()
 			skelPicker.Refresh()
+			headPicker.Refresh()
+			lookPicker.Refresh()
 			trcPicker.Refresh()
+			arrowPicker.Refresh()
 			distPicker.Refresh()
 			weaponPicker.Refresh()
 			teamPicker.Refresh()
@@ -1405,7 +1584,7 @@ return function(lib)
 		end
 
 		-- ====================================================
-		-- text / health helpers (shared by preview and real ESP)
+		-- text / health / armor helpers (shared by preview and real ESP)
 		-- ====================================================
 		local function nameText(player)
 			if nameSource == "Username" then
@@ -1488,6 +1667,18 @@ return function(lib)
 			return n
 		end
 
+		-- armor bar: same height as the box, on its right side (call computeBounds first)
+		local armBg = {0, 0, 0, 0}
+		local armRect = {0, 0, 0, 0}
+		local function computeArmor(frac)
+			local top = math.floor(bnd.minY - PAD)
+			local bottom = math.floor(bnd.maxY + PAD)
+			local H = bottom - top
+			local x = math.floor(bnd.maxX + PAD + 3)
+			armBg[1], armBg[2], armBg[3], armBg[4] = x - 1, top - 1, HP_W + 2, H + 2
+			armRect[1], armRect[2], armRect[3], armRect[4] = x, bottom - H * frac, HP_W, H * frac
+		end
+
 		-- where the tracers start, in screen coordinates
 		local function tracerOrigin(w, h, mouse)
 			if tracerFrom == "Center" then
@@ -1504,8 +1695,9 @@ return function(lib)
 		-- preview on the 3D avatar render (GUI objects inside the viewport)
 		-- ====================================================
 		local previewViewport
-		local prevBox, prevSkel, prevHp, prevTrc, prevFill = {}, {}, {}, {}, {}
+		local prevBox, prevSkel, prevHp, prevTrc, prevFill, prevArmor, prevLook = {}, {}, {}, {}, {}, {}, {}
 		local prevTexts = {} -- ["name" / "hpText" / "dist" / "weapon"] = TextLabel
+		local prevDot, prevDotStroke
 
 		local function findViewport()
 			if previewViewport and previewViewport.Parent then
@@ -1545,12 +1737,21 @@ return function(lib)
 			end
 		end
 
+		local function hideDotPreview()
+			if prevDot then
+				prevDot.Visible = false
+			end
+		end
+
 		local function hidePreview()
 			hidePool(prevBox)
 			hidePool(prevSkel)
 			hidePool(prevHp)
 			hidePool(prevTrc)
 			hidePool(prevFill)
+			hidePool(prevArmor)
+			hidePool(prevLook)
+			hideDotPreview()
 			for key in pairs(prevTexts) do
 				hidePreviewText(key)
 			end
@@ -1581,6 +1782,35 @@ return function(lib)
 			l.TextTransparency = 1 - a
 			l.Position = UDim2.fromOffset(x, y)
 			l.Visible = true
+		end
+
+		local function showDotPreview(x, y, r, c, a, filled)
+			if not prevDot then
+				prevDot = Instance.new("Frame")
+				prevDot.Name = "EspHeadDot"
+				prevDot.AnchorPoint = Vector2.new(0.5, 0.5)
+				prevDot.BorderSizePixel = 0
+				prevDot.Active = false
+				prevDot.ZIndex = 20
+				prevDot.Visible = false
+				local corner = Instance.new("UICorner")
+				corner.CornerRadius = UDim.new(1, 0)
+				corner.Parent = prevDot
+				prevDotStroke = Instance.new("UIStroke")
+				prevDotStroke.Thickness = 1.5
+				prevDotStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+				prevDotStroke.Parent = prevDot
+			end
+			if prevDot.Parent ~= previewViewport then
+				prevDot.Parent = previewViewport
+			end
+			prevDot.Position = UDim2.fromOffset(x, y)
+			prevDot.Size = UDim2.fromOffset(r * 2, r * 2)
+			prevDot.BackgroundColor3 = c
+			prevDot.BackgroundTransparency = filled and (1 - a) or 1
+			prevDotStroke.Color = c
+			prevDotStroke.Transparency = 1 - a
+			prevDot.Visible = true
 		end
 
 		local function drawLinePool(pool, count, list, c, a, thick)
@@ -1632,6 +1862,29 @@ return function(lib)
 			end
 		end
 
+		local function drawArmorPreview(show)
+			if not show then
+				hidePool(prevArmor)
+				return
+			end
+			local bg = getFrame(prevArmor, 1, "EspArmorBg")
+			bg.AnchorPoint = Vector2.new(0, 0)
+			bg.Rotation = 0
+			bg.BackgroundColor3 = Color3.fromRGB(10, 10, 12)
+			bg.BackgroundTransparency = 0.3
+			bg.Position = UDim2.fromOffset(armBg[1], armBg[2])
+			bg.Size = UDim2.fromOffset(armBg[3], armBg[4])
+			bg.Visible = true
+			local f = getFrame(prevArmor, 2, "EspArmorFill")
+			f.AnchorPoint = Vector2.new(0, 0)
+			f.Rotation = 0
+			f.BackgroundColor3 = colorOf(slots.armor)
+			f.BackgroundTransparency = 1 - slots.armor.a
+			f.Position = UDim2.fromOffset(armRect[1], armRect[2])
+			f.Size = UDim2.fromOffset(armRect[3], armRect[4])
+			f.Visible = true
+		end
+
 		local function updatePreview()
 			local viewport = findViewport()
 			if not (master and anyOn() and popup and popup.Visible and viewport) then
@@ -1678,6 +1931,22 @@ return function(lib)
 			n = feat.Skeleton and computeSkeleton(model, project) or 0
 			drawLinePool(prevSkel, n, bones, colorFor(slots.skel, nil), slots.skel.a, skelThick)
 
+			-- look direction
+			n = feat.LookDir and computeLook(model, project) or 0
+			drawLinePool(prevLook, n, lookSeg, colorFor(slots.look, nil), slots.look.a, 1.5)
+
+			-- head dot
+			if feat.HeadDot then
+				local hx, hy, hr = computeHead(model, project)
+				if hx then
+					showDotPreview(hx, hy, hr, colorFor(slots.head, nil), slots.head.a, headStyle == "Filled")
+				else
+					hideDotPreview()
+				end
+			else
+				hideDotPreview()
+			end
+
 			-- tracers (from the bottom / middle / top of the preview)
 			n = 0
 			if feat.Tracers then
@@ -1699,6 +1968,14 @@ return function(lib)
 			else
 				hidePool(prevHp)
 				hidePreviewText("hpText")
+			end
+
+			-- armor bar (moves too, a little out of step with the health)
+			if feat.Armor and hasB then
+				computeArmor(0.6 + 0.4 * math.sin(os.clock() * 0.7 + 1.5))
+				drawArmorPreview(true)
+			else
+				drawArmorPreview(false)
 			end
 
 			-- name (+ distance when it was moved here)
@@ -1732,6 +2009,28 @@ return function(lib)
 		-- ====================================================
 		local records = {} -- [player] = {...drawing objects...}
 
+		-- chams live in one folder as Highlight instances (Roblox draws at most ~31 highlights at once)
+		local chamFolder = Instance.new("Folder")
+		chamFolder.Name = "EspChams"
+		do
+			local parented = false
+			pcall(function()
+				if typeof(gethui) == "function" then
+					chamFolder.Parent = gethui()
+					parented = true
+				end
+			end)
+			if not parented then
+				pcall(function()
+					chamFolder.Parent = game:GetService("CoreGui")
+					parented = true
+				end)
+			end
+			if not parented then
+				chamFolder.Parent = LocalPlayer:WaitForChild("PlayerGui")
+			end
+		end
+
 		local function setZ(obj, z)
 			pcall(function() obj.ZIndex = z end)
 		end
@@ -1752,12 +2051,44 @@ return function(lib)
 			return sq
 		end
 
+		local function newCircle()
+			local c = Drawing.new("Circle")
+			pcall(function() c.NumSides = 24 end)
+			c.Thickness = 1.5
+			c.Filled = false
+			c.Visible = false
+			setZ(c, 2)
+			return c
+		end
+
+		local function newTriangle()
+			local t = Drawing.new("Triangle")
+			t.Filled = true
+			t.Thickness = 1
+			t.Visible = false
+			setZ(t, 2)
+			return t
+		end
+
+		local function newCham()
+			local h = Instance.new("Highlight")
+			h.Name = "EspCham"
+			h.Enabled = false
+			h.Parent = chamFolder
+			return h
+		end
+
 		local function newRecord()
 			return {
 				box = {}, boxShown = 0,
 				skel = {}, skelShown = 0,
 				trc = {}, trcShown = 0,
+				look = {}, lookShown = 0,
 				hp = {}, hpShown = 0, hpBg = nil, hpBgShown = false,
+				armor = nil, armorBg = nil, armorOn = false,
+				dot = nil, dotOn = false,
+				arrow = nil, arrowOn = false,
+				cham = nil,
 				fill = nil, fillOn = false,
 				text = {}, textOn = {}, textFont = {},
 			}
@@ -1774,10 +2105,18 @@ return function(lib)
 			for _, l in ipairs(rec.box) do kill(l) end
 			for _, l in ipairs(rec.skel) do kill(l) end
 			for _, l in ipairs(rec.trc) do kill(l) end
+			for _, l in ipairs(rec.look) do kill(l) end
 			for _, sq in ipairs(rec.hp) do kill(sq) end
 			if rec.hpBg then kill(rec.hpBg) end
+			if rec.armor then kill(rec.armor) end
+			if rec.armorBg then kill(rec.armorBg) end
+			if rec.dot then kill(rec.dot) end
+			if rec.arrow then kill(rec.arrow) end
 			if rec.fill then kill(rec.fill) end
 			for _, t in pairs(rec.text) do kill(t) end
+			if rec.cham then
+				pcall(function() rec.cham:Destroy() end)
+			end
 			records[player] = nil
 		end
 
@@ -1788,17 +2127,36 @@ return function(lib)
 			end
 		end
 
-		local function hideRecord(rec)
+		-- keepArrow: the off-screen arrow ignores the visible check, so it stays when everything else hides
+		local function hideRecord(rec, keepArrow)
 			for i = 1, rec.boxShown do rec.box[i].Visible = false end
 			rec.boxShown = 0
 			for i = 1, rec.skelShown do rec.skel[i].Visible = false end
 			rec.skelShown = 0
 			for i = 1, rec.trcShown do rec.trc[i].Visible = false end
 			rec.trcShown = 0
+			for i = 1, rec.lookShown do rec.look[i].Visible = false end
+			rec.lookShown = 0
 			for i = 1, rec.hpShown do rec.hp[i].Visible = false end
 			rec.hpShown = 0
 			if rec.hpBg then rec.hpBg.Visible = false end
 			rec.hpBgShown = false
+			if rec.armorOn then
+				rec.armor.Visible = false
+				rec.armorBg.Visible = false
+				rec.armorOn = false
+			end
+			if rec.dotOn then
+				rec.dot.Visible = false
+				rec.dotOn = false
+			end
+			if rec.arrowOn and not keepArrow then
+				rec.arrow.Visible = false
+				rec.arrowOn = false
+			end
+			if rec.cham then
+				rec.cham.Enabled = false
+			end
 			if rec.fill then rec.fill.Visible = false end
 			rec.fillOn = false
 			for key in pairs(rec.text) do
@@ -1813,11 +2171,12 @@ return function(lib)
 		end
 
 		-- draws `count` segments from `src` on the line list, hides the rest, returns count
+		-- (the alpha is multiplied by the distance fade of the player being drawn)
 		local function setLines(list, prevShown, count, src, c, a, thick)
 			while #list < count do
 				table.insert(list, newLine())
 			end
-			local alpha = dAlpha(a)
+			local alpha = dAlpha(a * curFade)
 			for i = 1, count do
 				local sg, l = src[i], list[i]
 				l.Color = c
@@ -1843,7 +2202,7 @@ return function(lib)
 				sq.Position = Vector2.new(r[1], r[2])
 				sq.Size = Vector2.new(r[3], r[4])
 				sq.Color = r[5]
-				sq.Transparency = dAlpha(1)
+				sq.Transparency = dAlpha(curFade)
 				sq.Visible = true
 			end
 			for i = count + 1, prevShown do
@@ -1870,7 +2229,7 @@ return function(lib)
 			end
 			t.Text = str
 			t.Color = c
-			t.Transparency = dAlpha(a)
+			t.Transparency = dAlpha(a * curFade)
 			return t
 		end
 
@@ -1888,7 +2247,19 @@ return function(lib)
 			return #str * 6.5, 13
 		end
 
-		local function updatePlayer(player, camera, project, camPos, ox, oy)
+		-- cham colors: with Team Colors on, the outline is a lighter shade of the fill
+		local function chamColors(player)
+			local fill = colorFor(slots.chamFill, player)
+			local outline
+			if feat.TeamColors then
+				outline = fill:Lerp(Color3.new(1, 1, 1), 0.35)
+			else
+				outline = colorOf(slots.chamOutline)
+			end
+			return fill, outline
+		end
+
+		local function updatePlayer(player, camera, project, camPos, vs, ox, oy)
 			local char = player.Character
 			local hum = char and char:FindFirstChildOfClass("Humanoid")
 			local root = char and char:FindFirstChild("HumanoidRootPart")
@@ -1901,8 +2272,6 @@ return function(lib)
 				if teamCheck and sameTeam(player) then
 					pass = false
 				elseif dist > renderDist then
-					pass = false
-				elseif visCheck and not isVisible(char, camera) then
 					pass = false
 				end
 			end
@@ -1917,6 +2286,61 @@ return function(lib)
 				rec = newRecord()
 				records[player] = rec
 			end
+			curFade = fadeFor(dist)
+
+			-- off-screen arrow (ignores the visible check)
+			if feat.Arrows then
+				local ax, ay, bx, by, cx, cy = computeArrow(camera, root.Position, vs, ARROW_SIZE[arrowSize], ARROW_RADIUS[arrowRadius])
+				if ax then
+					local t = rec.arrow
+					if not t then
+						t = newTriangle()
+						rec.arrow = t
+					end
+					t.PointA = Vector2.new(ax, ay)
+					t.PointB = Vector2.new(bx, by)
+					t.PointC = Vector2.new(cx, cy)
+					t.Color = colorFor(slots.arrow, player)
+					t.Transparency = dAlpha(slots.arrow.a * curFade)
+					t.Visible = true
+					rec.arrowOn = true
+				elseif rec.arrowOn then
+					rec.arrow.Visible = false
+					rec.arrowOn = false
+				end
+			elseif rec.arrowOn then
+				rec.arrow.Visible = false
+				rec.arrowOn = false
+			end
+
+			-- everything else needs the player to be visible when the check is on
+			if visCheck and not isVisible(char, camera) then
+				hideRecord(rec, true)
+				return
+			end
+
+			-- chams (Highlight)
+			if feat.Chams then
+				local h = rec.cham
+				if not h or not h.Parent then
+					h = newCham()
+					rec.cham = h
+				end
+				if h.Adornee ~= char then
+					h.Adornee = char
+				end
+				local fillC, outlineC = chamColors(player)
+				local showFill = chamStyle ~= "Outline"
+				local showOutline = chamStyle ~= "Fill"
+				h.FillColor = fillC
+				h.FillTransparency = showFill and (1 - slots.chamFill.a * curFade) or 1
+				h.OutlineColor = outlineC
+				h.OutlineTransparency = showOutline and (1 - slots.chamOutline.a * curFade) or 1
+				h.DepthMode = (chamWalls == "On") and Enum.HighlightDepthMode.AlwaysOnTop or Enum.HighlightDepthMode.Occluded
+				h.Enabled = true
+			elseif rec.cham then
+				rec.cham.Enabled = false
+			end
 
 			local hasB = needsBounds() and computeBounds(char, project)
 			local cx = (bnd.minX + bnd.maxX) / 2
@@ -1930,7 +2354,7 @@ return function(lib)
 					rec.fill = f
 				end
 				f.Color = colorFor(slots.fill, player)
-				f.Transparency = dAlpha(slots.fill.a)
+				f.Transparency = dAlpha(slots.fill.a * curFade)
 				f.Position = Vector2.new(bnd.minX - PAD, bnd.minY - PAD)
 				f.Size = Vector2.new(bnd.maxX - bnd.minX + PAD * 2, bnd.maxY - bnd.minY + PAD * 2)
 				f.Visible = true
@@ -1948,6 +2372,35 @@ return function(lib)
 			n = feat.Skeleton and computeSkeleton(char, project) or 0
 			rec.skelShown = setLines(rec.skel, rec.skelShown, n, bones, colorFor(slots.skel, player), slots.skel.a, skelThick)
 
+			-- look direction
+			n = feat.LookDir and computeLook(char, project) or 0
+			rec.lookShown = setLines(rec.look, rec.lookShown, n, lookSeg, colorFor(slots.look, player), slots.look.a, 1.5)
+
+			-- head dot
+			if feat.HeadDot then
+				local hx, hy, hr = computeHead(char, project)
+				if hx then
+					local d = rec.dot
+					if not d then
+						d = newCircle()
+						rec.dot = d
+					end
+					d.Position = Vector2.new(hx, hy)
+					d.Radius = hr
+					d.Filled = headStyle == "Filled"
+					d.Color = colorFor(slots.head, player)
+					d.Transparency = dAlpha(slots.head.a * curFade)
+					d.Visible = true
+					rec.dotOn = true
+				elseif rec.dotOn then
+					rec.dot.Visible = false
+					rec.dotOn = false
+				end
+			elseif rec.dotOn then
+				rec.dot.Visible = false
+				rec.dotOn = false
+			end
+
 			-- tracer
 			n = feat.Tracers and computeTracer(char, project, ox, oy) or 0
 			rec.trcShown = setLines(rec.trc, rec.trcShown, n, tracerSeg, colorFor(slots.trc, player), slots.trc.a, 1)
@@ -1960,8 +2413,8 @@ return function(lib)
 					if not rec.hpBg then
 						rec.hpBg = newSquare()
 						rec.hpBg.Color = Color3.fromRGB(10, 10, 12)
-						rec.hpBg.Transparency = dAlpha(0.7)
 					end
+					rec.hpBg.Transparency = dAlpha(0.7 * curFade)
 					rec.hpBg.Position = Vector2.new(hpBg[1], hpBg[2])
 					rec.hpBg.Size = Vector2.new(hpBg[3], hpBg[4])
 					rec.hpBg.Visible = true
@@ -1993,6 +2446,31 @@ return function(lib)
 					rec.hpBgShown = false
 				end
 				hideText(rec, "hpText")
+			end
+
+			-- armor bar (only when the character has an armor value above 0)
+			local aFrac = (feat.Armor and hasB) and armorFrac(char) or nil
+			if aFrac and aFrac > 0 then
+				computeArmor(aFrac)
+				if not rec.armorBg then
+					rec.armorBg = newSquare()
+					rec.armorBg.Color = Color3.fromRGB(10, 10, 12)
+					rec.armor = newSquare()
+				end
+				rec.armorBg.Transparency = dAlpha(0.7 * curFade)
+				rec.armorBg.Position = Vector2.new(armBg[1], armBg[2])
+				rec.armorBg.Size = Vector2.new(armBg[3], armBg[4])
+				rec.armorBg.Visible = true
+				rec.armor.Color = colorOf(slots.armor)
+				rec.armor.Transparency = dAlpha(slots.armor.a * curFade)
+				rec.armor.Position = Vector2.new(armRect[1], armRect[2])
+				rec.armor.Size = Vector2.new(armRect[3], armRect[4])
+				rec.armor.Visible = true
+				rec.armorOn = true
+			elseif rec.armorOn then
+				rec.armor.Visible = false
+				rec.armorBg.Visible = false
+				rec.armorOn = false
 			end
 
 			-- name (+ distance when it was moved here)
@@ -2044,14 +2522,14 @@ return function(lib)
 			end
 			local project = makeProjector(camera)
 			local camPos = camera.CFrame.Position
+			local vs = camera.ViewportSize
 			local ox, oy = 0, 0
 			if feat.Tracers then
-				local vs = camera.ViewportSize
 				ox, oy = tracerOrigin(vs.X, vs.Y, UserInputService:GetMouseLocation())
 			end
 			for _, player in ipairs(Players:GetPlayers()) do
 				if player ~= LocalPlayer then
-					updatePlayer(player, camera, project, camPos, ox, oy)
+					updatePlayer(player, camera, project, camPos, vs, ox, oy)
 				end
 			end
 		end
@@ -2072,7 +2550,7 @@ return function(lib)
 			for player in pairs(records) do
 				removeRecord(player)
 			end
-			for _, pool in ipairs({prevBox, prevSkel, prevHp, prevTrc, prevFill}) do
+			for _, pool in ipairs({prevBox, prevSkel, prevHp, prevTrc, prevFill, prevArmor, prevLook}) do
 				for _, f in ipairs(pool) do
 					f:Destroy()
 				end
@@ -2080,6 +2558,10 @@ return function(lib)
 			for _, l in pairs(prevTexts) do
 				l:Destroy()
 			end
+			if prevDot then
+				prevDot:Destroy()
+			end
+			chamFolder:Destroy()
 			settings:Destroy()
 			scroll:Destroy()
 		end
@@ -2117,11 +2599,16 @@ return function(lib)
 			end,
 			SetBoxEsp = function(value) featSwitch.Box.Set(value) end,
 			SetBoxFill = function(value) featSwitch.BoxFill.Set(value) end,
+			SetChams = function(value) featSwitch.Chams.Set(value) end,
 			SetNameEsp = function(value) featSwitch.Name.Set(value) end,
 			SetHealthEsp = function(value) featSwitch.Health.Set(value) end,
+			SetArmorBar = function(value) featSwitch.Armor.Set(value) end,
 			SetHealthText = function(value) featSwitch.HealthText.Set(value) end,
 			SetSkeletonEsp = function(value) featSwitch.Skeleton.Set(value) end,
+			SetHeadDot = function(value) featSwitch.HeadDot.Set(value) end,
+			SetLookDirection = function(value) featSwitch.LookDir.Set(value) end,
 			SetTracers = function(value) featSwitch.Tracers.Set(value) end,
+			SetArrows = function(value) featSwitch.Arrows.Set(value) end,
 			SetDistanceText = function(value) featSwitch.Distance.Set(value) end,
 			SetWeaponText = function(value) featSwitch.Weapon.Set(value) end,
 			SetTeamColors = function(value) featSwitch.TeamColors.Set(value) end,
@@ -2145,6 +2632,29 @@ return function(lib)
 				end
 			end,
 
+			-- chams
+			SetChamsStyle = function(name) -- "Fill" / "Outline" / "Both"
+				if indexOf(CHAM_STYLES, name) then
+					chamStyleChoice.Set(name)
+				end
+			end,
+			SetChamsThroughWalls = function(value)
+				chamWallsChoice.Set(value and "On" or "Off")
+			end,
+			SetChamsColors = function(fill, outline, fillAlpha, outlineAlpha)
+				setSlot(slots.chamFill, fill)
+				if outline then
+					setSlot(slots.chamOutline, outline)
+				end
+				if fillAlpha then
+					slots.chamFill.a = math.clamp(fillAlpha, 0, 1)
+				end
+				if outlineAlpha then
+					slots.chamOutline.a = math.clamp(outlineAlpha, 0, 1)
+				end
+				refreshAllPickers()
+			end,
+
 			-- name
 			SetNameSource = function(name) -- "Display" / "Username" / "Both"
 				if indexOf(NAME_SOURCES, name) then
@@ -2153,7 +2663,7 @@ return function(lib)
 			end,
 			SetNameColor = function(c) setSlot(slots.name, c) end,
 
-			-- health
+			-- health / armor
 			SetHealthMode = function(name) -- "Solid" / "Gradient"
 				if name == "Solid" or name == "Gradient" then
 					hpModeChoice.Set(name)
@@ -2164,6 +2674,7 @@ return function(lib)
 				setSlot(slots.hpMid, mid)
 				setSlot(slots.hpLow, low)
 			end,
+			SetArmorColor = function(c) setSlot(slots.armor, c) end,
 			SetHealthTextFormat = function(name) -- "Number" / "Percent"
 				if indexOf(HP_FORMATS, name) then
 					hpFormatChoice.Set(name)
@@ -2179,13 +2690,33 @@ return function(lib)
 				end
 			end,
 
-			-- tracers
+			-- head dot / look direction
+			SetHeadDotStyle = function(name) -- "Outline" / "Filled"
+				if indexOf(HEAD_STYLES, name) then
+					headStyleChoice.Set(name)
+				end
+			end,
+			SetHeadDotColor = function(c) setSlot(slots.head, c) end,
+			SetLookColor = function(c) setSlot(slots.look, c) end,
+
+			-- tracers / arrows
 			SetTracerOrigin = function(name) -- "Bottom" / "Center" / "Top" / "Mouse"
 				if indexOf(TRACER_ORIGINS, name) then
 					tracerChoice.Set(name)
 				end
 			end,
 			SetTracerColor = function(c) setSlot(slots.trc, c) end,
+			SetArrowSize = function(name) -- "Small" / "Medium" / "Large"
+				if indexOf(ARROW_SIZES, name) then
+					arrowSizeChoice.Set(name)
+				end
+			end,
+			SetArrowDistance = function(name) -- "Near" / "Mid" / "Far"
+				if indexOf(ARROW_RADII, name) then
+					arrowRadiusChoice.Set(name)
+				end
+			end,
+			SetArrowColor = function(c) setSlot(slots.arrow, c) end,
 
 			-- distance / weapon text
 			SetDistanceColor = function(c) setSlot(slots.dist, c) end,
