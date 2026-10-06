@@ -3,8 +3,8 @@
 --   local buildMainTab = loadstring(game:HttpGet(MAINTAB_URL))()(lib)
 --   local mainTabs = buildMainTab({pages = pages, fadeInfo = fadeInfo, slideInfo = slideInfo})
 --
--- AimBot : the Universal Aimbot logic (mouse / camera aim, fov circle, team + visible check,
---          prediction, whitelist friends) with a UI for every setting.
+-- AimBot : mouse / camera aim with sticky target lock, per-axis smoothness + prediction,
+--          team check and a raycast visible check.
 -- Trigger: the trigger bot from the same script (delay, clicks/sec, spam, aim-key only).
 -- Silent : empty page, ready for content.
 --
@@ -12,7 +12,7 @@
 --   mainTabs.Pages.AimBot / .Silent / .Trigger  -> the sub-pages
 --   mainTabs.Select("Trigger")                  -> switch sub-tab from code
 --   mainTabs.Current()                          -> name of the open sub-tab
---   mainTabs.Config                             -> live settings table (cfg.Enabled, cfg.Strength, ...)
+--   mainTabs.Config                             -> live settings table (cfg.Enabled, cfg.SmoothX, ...)
 --
 -- Not ported from the original script: the Aim Assist mode, the crosshair and the
 -- game specific shims (Phantom Forces, Bad Business, Rush Point, Arsenal, MM2).
@@ -208,7 +208,6 @@ return function(lib)
 			VisibleCheck = true,
 			IgnoreTransparency = true,
 			IgnoredTransparency = 0.5, -- parts more transparent than this don't block the visible check
-			RefreshRate = 10, -- milliseconds between aim updates
 			Keybind = "MouseButton2",
 			AimType = "Hold", -- "Hold" or "Toggle"
 			MaximumDistance = 300,
@@ -216,13 +215,12 @@ return function(lib)
 			TargetPart = "Head", -- "Head" or "Body"
 			AimAtNearestPart = false,
 			UseMouseMoveRel = true, -- false = turn the camera instead
-			Strength = 100, -- 1% - 200%
-			FovEnabled = true,
-			FovRadius = 100,
-			FovDynamic = true,
-			PredictionEnabled = false,
-			PredictionStrength = 2,
-			WhitelistFriends = true,
+			Sticky = true, -- stay locked on one player until they die / leave / you release the key
+			PredictionEnabled = true,
+			PredX = 4, -- 1 - 20, higher = more prediction (horizontal)
+			PredY = 4, -- 1 - 20, higher = more prediction (vertical)
+			SmoothX = 15, -- 1 - 100, higher = smoother / slower (horizontal)
+			SmoothY = 15, -- 1 - 100, higher = smoother / slower (vertical)
 			Priority = {}, -- usernames that are always targeted first
 			Whitelisted = {}, -- usernames / user ids that are never targeted
 			Ignore = {}, -- extra instances the visible check ray should ignore
@@ -424,6 +422,31 @@ return function(lib)
 			row.Parent = card
 			makeLabel(row, title, 40)
 			makeSwitch(row, initial, onChange)
+		end
+
+		-- title-only header (no switch) for grouped windows
+		local function addTitle(card, title)
+			local row = Instance.new("Frame")
+			row.LayoutOrder = 1
+			row.BackgroundTransparency = 1
+			row.Size = UDim2.new(1, 0, 0, 40)
+			row.Parent = card
+			makeLabel(row, title, 40)
+		end
+
+		-- thin divider row
+		local function addDivider(parent, order)
+			local divRow = Instance.new("Frame")
+			divRow.LayoutOrder = order
+			divRow.BackgroundTransparency = 1
+			divRow.Size = UDim2.new(1, 0, 0, 1)
+			divRow.Parent = parent
+			local line = Instance.new("Frame")
+			line.Position = UDim2.fromOffset(14, 0)
+			line.Size = UDim2.new(1, -28, 1, 0)
+			line.BackgroundColor3 = Color3.fromRGB(38, 38, 42)
+			line.BorderSizePixel = 0
+			line.Parent = divRow
 		end
 
 		-- switch row inside a card's options
@@ -647,7 +670,6 @@ return function(lib)
 		local mousemoverel_ = mousemoverel
 		local mouse1press_ = mouse1press or mouse1down
 		local mouse1release_ = mouse1release or mouse1up
-		local hasDrawing = typeof(Drawing) == "table" or (Drawing ~= nil and Drawing.new ~= nil)
 
 		local BODY = {}
 		for _, partName in ipairs({
@@ -674,54 +696,18 @@ return function(lib)
 			return nil
 		end
 
-		-- friends are looked up once in the background (IsFriendsWith yields)
-		local friendCache = {}
-		local function isFriend(plr)
-			local cached = friendCache[plr]
-			if cached == nil then
-				friendCache[plr] = false
-				task.spawn(function()
-					local ok, result = pcall(function()
-						return player:IsFriendsWith(plr.UserId)
-					end)
-					friendCache[plr] = ok and result or false
-				end)
-				return false
-			end
-			return cached
-		end
-
 		local function isWhitelisted(plr)
-			if table.find(cfg.Whitelisted, plr.Name) or table.find(cfg.Whitelisted, plr.UserId) then
-				return true
-			end
-			return cfg.WhitelistFriends and isFriend(plr)
+			return table.find(cfg.Whitelisted, plr.Name) ~= nil or table.find(cfg.Whitelisted, plr.UserId) ~= nil
 		end
 
-		local function fovRadius()
-			local radius = cfg.FovRadius
-			if cfg.FovDynamic then
-				radius = radius / (camera.FieldOfView / 80)
-			end
-			return radius
+		local function isEnemy(plr)
+			local team = plr.Team
+			return not cfg.TeamCheck or team == nil or team ~= player.Team
 		end
 
-		-- is any body part of the character inside the fov circle?
-		local function inFov(char)
-			if not cfg.FovEnabled then
-				return true
-			end
-			local mouseLoc = UserInputService:GetMouseLocation()
-			local radius = fovRadius()
-			for _, part in ipairs(char:GetChildren()) do
-				if BODY[part.Name] and part:IsA("BasePart") then
-					local v, onScreen = camera:WorldToViewportPoint(part.Position)
-					if onScreen and (Vector2.new(v.X, v.Y) - mouseLoc).Magnitude <= radius then
-						return true
-					end
-				end
-			end
-			return false
+		local function validTarget(plr)
+			return plr ~= nil and plr ~= player and plr.Parent == Players
+				and isAlive(plr) ~= nil and not isWhitelisted(plr) and isEnemy(plr)
 		end
 
 		local function closestPlayer()
@@ -729,21 +715,18 @@ return function(lib)
 
 			for _, name in ipairs(cfg.Priority) do
 				local plr = Players:FindFirstChild(name)
-				if plr and plr ~= player and isAlive(plr) and inFov(plr.Character) then
+				if plr and validTarget(plr) then
 					return plr
 				end
 			end
 
-			local myTeam = player.Team
 			local best, bestDist = nil, math.huge
 			for _, plr in ipairs(Players:GetPlayers()) do
-				if plr ~= player and isAlive(plr) and not isWhitelisted(plr) then
+				if validTarget(plr) then
 					local v, onScreen = camera:WorldToViewportPoint(plr.Character:GetPivot().Position)
 					if onScreen then
 						local mag = (Vector2.new(v.X, v.Y) - mouseLoc).Magnitude
-						local team = plr.Team
-						local enemy = not cfg.TeamCheck or team == nil or team ~= myTeam
-						if enemy and mag < bestDist then
+						if mag < bestDist then
 							best, bestDist = plr, mag
 						end
 					end
@@ -816,72 +799,95 @@ return function(lib)
 			return false
 		end
 
-		-- fov circle
-		local fovCircle
-		if hasDrawing then
-			fovCircle = Drawing.new("Circle")
-			fovCircle.Visible = false
-			fovCircle.Transparency = 1
-			fovCircle.Color = Color3.fromRGB(255, 255, 255)
-			fovCircle.Thickness = 1
-			fovCircle.NumSides = 64
-			fovCircle.Radius = cfg.FovRadius
-			fovCircle.Filled = false
+		-- sticky lock + smoothing state
+		local locked
+		local smoothVel
+		local accX, accY = 0, 0
+
+		local function releaseLock()
+			locked = nil
+			smoothVel = nil
+			accX, accY = 0, 0
 		end
 
-		local function updateFovCircle(mouseLoc)
-			if not fovCircle then
-				return
+		-- per-frame blend factor from a 1-100 smoothness (1 = snap), frame-rate independent
+		local function blend(smooth, dt)
+			if smooth <= 1 then
+				return 1
 			end
-			local show = cfg.Enabled and cfg.FovEnabled
-			fovCircle.Visible = show
-			if show then
-				fovCircle.Position = mouseLoc
-				fovCircle.Radius = fovRadius()
-			end
+			return 1 - (1 - 1 / smooth) ^ (dt * 60)
 		end
 
-		local lastUpdate = 0
-		local function aimStep()
+		local function aimStep(dt)
 			if not cfg.Enabled or not (aiming or cfg.AlwaysActive) then
+				if locked then
+					releaseLock()
+				end
 				return
 			end
-			local now = os.clock()
-			if now - lastUpdate < math.max(cfg.RefreshRate, 0) / 1000 then
-				return
-			end
-			lastUpdate = now
 
-			local plr = closestPlayer()
+			local plr
+			if cfg.Sticky and locked and validTarget(locked) then
+				plr = locked
+			else
+				plr = closestPlayer()
+				if plr ~= locked then
+					releaseLock()
+				end
+				locked = cfg.Sticky and plr or nil
+			end
 			if not plr then
 				return
 			end
+
 			local char = plr.Character
-			local camPos = camera.CFrame.Position
-			local dist = (camPos - char:GetPivot().Position).Magnitude
+			local cf = camera.CFrame
+			local dist = (cf.Position - char:GetPivot().Position).Magnitude
 			if dist > cfg.MaximumDistance then
+				if locked then
+					releaseLock()
+				end
 				return
 			end
 
 			local target = pickTarget(char)
-			if not target or not inFov(char) or not isVisible(char, target) then
-				return
+			if not target or not isVisible(char, target) then
+				return -- lock is kept, aim just pauses while the target is hidden
 			end
 
 			local position = target.Position
 			if cfg.PredictionEnabled then
-				local strength = math.clamp(cfg.PredictionStrength, 1, 20) / 10
-				position += target.AssemblyLinearVelocity * strength * dist / 100
+				-- smoothed velocity so a noisy replicated velocity doesn't shake the aim
+				local vel = target.AssemblyLinearVelocity
+				smoothVel = smoothVel and smoothVel:Lerp(vel, math.clamp(dt * 12, 0, 1)) or vel
+				local k = dist / 1000
+				position += cf.RightVector * smoothVel:Dot(cf.RightVector) * cfg.PredX * k
+					+ cf.UpVector * smoothVel:Dot(cf.UpVector) * cfg.PredY * k
 			end
 
+			local ax, ay = blend(cfg.SmoothX, dt), blend(cfg.SmoothY, dt)
+
 			if cfg.UseMouseMoveRel and mousemoverel_ then
-				local mouseLoc = UserInputService:GetMouseLocation()
 				local v = camera:WorldToViewportPoint(position)
-				local strength = math.clamp(cfg.Strength, 1, 200) / 100
-				mousemoverel_((v.X - mouseLoc.X) * strength, (v.Y - mouseLoc.Y) * strength)
+				if v.Z <= 0 then
+					return
+				end
+				local mouseLoc = UserInputService:GetMouseLocation()
+				-- carry the sub-pixel remainder so small moves aren't lost (that causes stutter)
+				accX += (v.X - mouseLoc.X) * ax
+				accY += (v.Y - mouseLoc.Y) * ay
+				local mx = accX >= 0 and math.floor(accX) or math.ceil(accX)
+				local my = accY >= 0 and math.floor(accY) or math.ceil(accY)
+				accX -= mx
+				accY -= my
+				if mx ~= 0 or my ~= 0 then
+					mousemoverel_(mx, my)
+				end
 			else
-				local goal = CFrame.new(camPos, position)
-				camera.CFrame = camera.CFrame:Lerp(goal, math.clamp(cfg.Strength / 100, 0, 1))
+				local cy, cp = cf:ToOrientation()
+				local gy, gp = CFrame.lookAt(cf.Position, position):ToOrientation()
+				local dyaw = (gy - cy + math.pi) % (2 * math.pi) - math.pi
+				camera.CFrame = CFrame.new(cf.Position) * CFrame.fromOrientation(cp + (gp - cp) * ay, cy + dyaw * ax, 0)
 			end
 		end
 
@@ -1019,15 +1025,10 @@ return function(lib)
 			end
 		end))
 
-		table.insert(connections, RunService.RenderStepped:Connect(function()
+		table.insert(connections, RunService.RenderStepped:Connect(function(dt)
 			camera = workspace.CurrentCamera or camera
-			updateFovCircle(UserInputService:GetMouseLocation())
-			aimStep()
+			aimStep(dt)
 			triggerStep()
-		end))
-
-		table.insert(connections, Players.PlayerRemoving:Connect(function(plr)
-			friendCache[plr] = nil
 		end))
 
 		-- ====================================================
@@ -1041,7 +1042,7 @@ return function(lib)
 				return order
 			end
 
-			-- Aimbot
+			-- Aimbot (own window)
 			do
 				local card = newCard(scroll, nextOrder())
 				local opts = newOptions(card, 2)
@@ -1064,81 +1065,76 @@ return function(lib)
 					cfg.Keybind = name
 					aiming = false
 				end)
-				addSlider(opts.group, 5, "Strength", 1, 200, cfg.Strength, "%", function(v)
-					cfg.Strength = v
-				end)
-				addSlider(opts.group, 6, "Max distance", 50, 1000, cfg.MaximumDistance, "", function(v)
+				addSlider(opts.group, 5, "Max distance", 50, 1000, cfg.MaximumDistance, "", function(v)
 					cfg.MaximumDistance = v
+				end)
+				addSwitchRow(opts.group, 6, "Sticky aim", cfg.Sticky, function(v)
+					cfg.Sticky = v
+					releaseLock()
 				end)
 				addSwitchRow(opts.group, 7, "Always active", cfg.AlwaysActive, function(v)
 					cfg.AlwaysActive = v
 				end)
-				opts.height += METHODS_H * 3 + KEY_H + SLIDER_H * 2 + SWITCH_H
+				opts.height += METHODS_H * 3 + KEY_H + SLIDER_H + SWITCH_H * 2
 				opts.setOpen(cfg.Enabled, false)
 			end
 
-			-- Team check
+			-- Prediction and Smoothness (one window)
 			do
 				local card = newCard(scroll, nextOrder())
-				addHeader(card, "Team check", cfg.TeamCheck, function(v)
+				addTitle(card, "Prediction and Smoothness")
+				local body = Instance.new("Frame")
+				body.LayoutOrder = 2
+				body.BackgroundTransparency = 1
+				body.Size = UDim2.new(1, 0, 0, 0)
+				body.AutomaticSize = Enum.AutomaticSize.Y
+				body.Parent = card
+				local bl = Instance.new("UIListLayout")
+				bl.SortOrder = Enum.SortOrder.LayoutOrder
+				bl.Parent = body
+
+				addDivider(body, 0)
+				addSwitchRow(body, 1, "Prediction", cfg.PredictionEnabled, function(v)
+					cfg.PredictionEnabled = v
+				end)
+				addSlider(body, 2, "Prediction X", 1, 20, cfg.PredX, "", function(v)
+					cfg.PredX = v
+				end)
+				addSlider(body, 3, "Prediction Y", 1, 20, cfg.PredY, "", function(v)
+					cfg.PredY = v
+				end)
+				addSlider(body, 4, "Smoothness X", 1, 100, cfg.SmoothX, "", function(v)
+					cfg.SmoothX = v
+				end)
+				addSlider(body, 5, "Smoothness Y", 1, 100, cfg.SmoothY, "", function(v)
+					cfg.SmoothY = v
+				end)
+			end
+
+			-- Checks (team + raycast visible check, one window)
+			do
+				local card = newCard(scroll, nextOrder())
+				addTitle(card, "Checks")
+				local body = Instance.new("Frame")
+				body.LayoutOrder = 2
+				body.BackgroundTransparency = 1
+				body.Size = UDim2.new(1, 0, 0, 0)
+				body.AutomaticSize = Enum.AutomaticSize.Y
+				body.Parent = card
+				local bl = Instance.new("UIListLayout")
+				bl.SortOrder = Enum.SortOrder.LayoutOrder
+				bl.Parent = body
+
+				addDivider(body, 0)
+				addSwitchRow(body, 1, "Team check", cfg.TeamCheck, function(v)
 					cfg.TeamCheck = v
 				end)
-			end
-
-			-- Visible check
-			do
-				local card = newCard(scroll, nextOrder())
-				local opts = newOptions(card, 2)
-				addHeader(card, "Visible check", cfg.VisibleCheck, function(v)
+				addSwitchRow(body, 2, "Visible check (raycast)", cfg.VisibleCheck, function(v)
 					cfg.VisibleCheck = v
-					opts.setOpen(v, true)
 				end)
-				addSwitchRow(opts.group, 1, "Ignore transparent parts", cfg.IgnoreTransparency, function(v)
+				addSwitchRow(body, 3, "Ignore transparent parts", cfg.IgnoreTransparency, function(v)
 					cfg.IgnoreTransparency = v
 				end)
-				opts.height += SWITCH_H
-				opts.setOpen(cfg.VisibleCheck, false)
-			end
-
-			-- Ignore friends
-			do
-				local card = newCard(scroll, nextOrder())
-				addHeader(card, "Ignore friends", cfg.WhitelistFriends, function(v)
-					cfg.WhitelistFriends = v
-				end)
-			end
-
-			-- FOV circle
-			do
-				local card = newCard(scroll, nextOrder())
-				local opts = newOptions(card, 2)
-				addHeader(card, "FOV circle", cfg.FovEnabled, function(v)
-					cfg.FovEnabled = v
-					opts.setOpen(v, true)
-				end)
-				addSlider(opts.group, 1, "Radius", 20, 600, cfg.FovRadius, "", function(v)
-					cfg.FovRadius = v
-				end)
-				addSwitchRow(opts.group, 2, "Scale with zoom", cfg.FovDynamic, function(v)
-					cfg.FovDynamic = v
-				end)
-				opts.height += SLIDER_H + SWITCH_H
-				opts.setOpen(cfg.FovEnabled, false)
-			end
-
-			-- Prediction
-			do
-				local card = newCard(scroll, nextOrder())
-				local opts = newOptions(card, 2)
-				addHeader(card, "Prediction", cfg.PredictionEnabled, function(v)
-					cfg.PredictionEnabled = v
-					opts.setOpen(v, true)
-				end)
-				addSlider(opts.group, 1, "Strength", 1, 20, cfg.PredictionStrength, "", function(v)
-					cfg.PredictionStrength = v
-				end)
-				opts.height += SLIDER_H
-				opts.setOpen(cfg.PredictionEnabled, false)
 			end
 		end
 
@@ -1183,11 +1179,6 @@ return function(lib)
 				conn:Disconnect()
 			end
 			table.clear(connections)
-			if fovCircle then
-				pcall(function()
-					fovCircle:Remove()
-				end)
-			end
 		end
 		win.onClose(destroy)
 
