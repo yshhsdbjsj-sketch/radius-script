@@ -7,8 +7,7 @@
 --          team check and a raycast visible check.
 -- Trigger: trigger bot with its own key (hold / toggle), delay, clicks/sec, hitbox multiplier,
 --          team check and visible check.
--- Silent : raycast silent aim (redirects the game's own shot rays onto the target) with its own
---          key, distance, hit part, sticky lock, and visible / team / health checks.
+-- Silent : empty page, ready for content.
 --
 -- returns:
 --   mainTabs.Pages.AimBot / .Silent / .Trigger  -> the sub-pages
@@ -227,18 +226,6 @@ return function(lib)
 			Priority = {}, -- usernames that are always targeted first
 			Whitelisted = {}, -- usernames / user ids that are never targeted
 			Ignore = {}, -- extra instances the visible check ray should ignore
-			Silent = {
-				Enabled = false,
-				Mode = "Hold", -- "Hold" or "Toggle"
-				Keybind = "C",
-				Distance = 300,
-				HitPart = "Head", -- "Head", "Body" or "Random"
-				Sticky = true,
-				VisibleCheck = false,
-				TeamCheck = false,
-				HealthCheck = false,
-				MinHealth = 10, -- percent of max health
-			},
 			Trigger = {
 				Enabled = false,
 				Mode = "Hold", -- "Hold" (active while the key is down) or "Toggle" (key turns it on / off)
@@ -251,7 +238,6 @@ return function(lib)
 			},
 		}
 		local trig = cfg.Trigger
-		local silent = cfg.Silent
 
 		if workspace:FindFirstChild("Ignore") then
 			table.insert(cfg.Ignore, workspace.Ignore)
@@ -1025,142 +1011,6 @@ return function(lib)
 		end
 
 		-- ====================================================
-		-- silent aim (raycast): while active, rays the game casts from the camera area are
-		-- bent toward the chosen part. Needs hookmetamethod / checkcaller / getnamecallmethod.
-		-- ====================================================
-		local silentHeld, silentOn = false, false
-		local silentLocked, silentPlayer, silentPart, silentPos
-		local silentRerollAt = 0
-		local hookAlive = true
-
-		local function silentActive()
-			if not silent.Enabled then
-				return false
-			end
-			if silent.Mode == "Toggle" then
-				return silentOn
-			end
-			return silentHeld
-		end
-
-		local function silentValid(plr)
-			if not (plr and plr ~= player and plr.Parent == Players and isAlive(plr)
-				and not isWhitelisted(plr) and isEnemy(plr, silent.TeamCheck)) then
-				return false
-			end
-			local char = plr.Character
-			if silent.HealthCheck then
-				local hum = char:FindFirstChildOfClass("Humanoid")
-				if not hum or hum.Health / math.max(hum.MaxHealth, 1) * 100 < silent.MinHealth then
-					return false
-				end
-			end
-			return (camera.CFrame.Position - char:GetPivot().Position).Magnitude <= silent.Distance
-		end
-
-		local function silentPickPart(char)
-			if silent.HitPart == "Head" then
-				return char:FindFirstChild("Head")
-			elseif silent.HitPart == "Body" then
-				return char:FindFirstChild("UpperTorso") or char:FindFirstChild("Torso")
-					or char:FindFirstChild("HumanoidRootPart")
-			end
-			-- Random: re-roll a few times a second, not every frame
-			local now = os.clock()
-			if silentPart and silentPart.Parent == char and now < silentRerollAt then
-				return silentPart
-			end
-			local options = {}
-			for _, part in ipairs(char:GetChildren()) do
-				if BODY[part.Name] and part:IsA("BasePart") then
-					table.insert(options, part)
-				end
-			end
-			silentRerollAt = now + 0.35
-			return options[math.random(1, math.max(#options, 1))]
-		end
-
-		local function silentStep()
-			silentPos = nil
-			if not silentActive() then
-				silentLocked, silentPlayer, silentPart = nil, nil, nil
-				return
-			end
-
-			local plr
-			if silent.Sticky and silentLocked and silentValid(silentLocked) then
-				plr = silentLocked
-			else
-				local mouseLoc = UserInputService:GetMouseLocation()
-				local bestDist = math.huge
-				for _, candidate in ipairs(Players:GetPlayers()) do
-					if silentValid(candidate) then
-						local v, onScreen = camera:WorldToViewportPoint(candidate.Character:GetPivot().Position)
-						if onScreen then
-							local mag = (Vector2.new(v.X, v.Y) - mouseLoc).Magnitude
-							if mag < bestDist then
-								plr, bestDist = candidate, mag
-							end
-						end
-					end
-				end
-				silentLocked = silent.Sticky and plr or nil
-			end
-			if not plr then
-				silentPlayer, silentPart = nil, nil
-				return
-			end
-			if plr ~= silentPlayer then
-				silentPlayer, silentPart = plr, nil
-				silentRerollAt = 0
-			end
-
-			local part = silentPickPart(plr.Character)
-			if not part then
-				return
-			end
-			silentPart = part
-			if not isVisible(plr.Character, part, silent.VisibleCheck) then
-				return -- lock stays, shots just aren't redirected while the target is hidden
-			end
-			silentPos = part.Position
-		end
-
-		if hookmetamethod and checkcaller and getnamecallmethod then
-			pcall(function()
-				local wrap = newcclosure or function(f)
-					return f
-				end
-				local oldNamecall
-				oldNamecall = hookmetamethod(game, "__namecall", wrap(function(self, ...)
-					if hookAlive and silentPos and self == workspace and not checkcaller() then
-						local method = getnamecallmethod()
-						local camPos = camera.CFrame.Position
-						if method == "Raycast" then
-							local args = table.pack(...)
-							local origin, dir = args[1], args[2]
-							if typeof(origin) == "Vector3" and typeof(dir) == "Vector3"
-								and dir.Magnitude >= 50 and (origin - camPos).Magnitude < 25 then
-								args[2] = (silentPos - origin).Unit * dir.Magnitude
-								return oldNamecall(self, table.unpack(args, 1, args.n))
-							end
-						elseif method == "FindPartOnRay" or method == "FindPartOnRayWithIgnoreList"
-							or method == "FindPartOnRayWithWhitelist" then
-							local args = table.pack(...)
-							local ray = args[1]
-							if typeof(ray) == "Ray" and ray.Direction.Magnitude >= 50
-								and (ray.Origin - camPos).Magnitude < 25 then
-								args[1] = Ray.new(ray.Origin, (silentPos - ray.Origin).Unit * ray.Direction.Magnitude)
-								return oldNamecall(self, table.unpack(args, 1, args.n))
-							end
-						end
-					end
-					return oldNamecall(self, ...)
-				end))
-			end)
-		end
-
-		-- ====================================================
 		-- input + loops
 		-- ====================================================
 		local function bindMatches(bind, input)
@@ -1212,13 +1062,6 @@ return function(lib)
 					aiming = true
 				end
 			end
-			if bindMatches(silent.Keybind, input) then
-				if silent.Mode == "Toggle" then
-					silentOn = not silentOn
-				else
-					silentHeld = true
-				end
-			end
 			if trigMatches(input) then
 				if trig.Mode == "Toggle" then
 					trigOn = not trigOn
@@ -1243,9 +1086,6 @@ return function(lib)
 			if trig.Mode == "Hold" and trigMatches(input) then
 				trigHeld = false
 			end
-			if silent.Mode == "Hold" and bindMatches(silent.Keybind, input) then
-				silentHeld = false
-			end
 			if processed then
 				return
 			end
@@ -1266,7 +1106,6 @@ return function(lib)
 		table.insert(connections, RunService.RenderStepped:Connect(function(dt)
 			camera = workspace.CurrentCamera or camera
 			aimStep(dt)
-			silentStep()
 			triggerStep()
 		end))
 
@@ -1596,67 +1435,6 @@ return function(lib)
 		end
 
 		-- ====================================================
-		-- Silent page
-		-- ====================================================
-		do
-			local scroll = newScroll(subPages.Silent)
-
-			-- Silent aim (own window)
-			do
-				local card = newCard(scroll, 1)
-				local opts = newOptions(card, 2)
-				addHeader(card, "Silent aim", silent.Enabled, function(v)
-					silent.Enabled = v
-					silentOn, silentHeld = false, false
-					opts.setOpen(v, true)
-				end)
-				addSegmented(opts.group, 1, {"Hold", "Toggle"}, silent.Mode, function(name)
-					silent.Mode = name
-					silentOn, silentHeld = false, false
-				end)
-				addKeyRow(opts.group, 2, "Silent key", silent.Keybind, function(name)
-					silent.Keybind = name
-					silentOn, silentHeld = false, false
-				end)
-				addSegmented(opts.group, 3, {"Head", "Body", "Random"}, silent.HitPart, function(name)
-					silent.HitPart = name
-				end)
-				addSlider(opts.group, 4, "Distance", 50, 1000, silent.Distance, "", function(v)
-					silent.Distance = v
-				end)
-				addSwitchRow(opts.group, 5, "Sticky aim", silent.Sticky, function(v)
-					silent.Sticky = v
-					silentLocked = nil
-				end)
-				opts.height += METHODS_H * 2 + KEY_H + SLIDER_H + SWITCH_H
-				opts.setOpen(silent.Enabled, false)
-			end
-
-			-- Checks (own window)
-			do
-				local card = newCard(scroll, 2)
-				addHeader(card, "Visible check (raycast)", silent.VisibleCheck, function(v)
-					silent.VisibleCheck = v
-				end, 1)
-				addDivider(card, 2)
-				addHeader(card, "Team check", silent.TeamCheck, function(v)
-					silent.TeamCheck = v
-				end, 3)
-				addDivider(card, 4)
-				local hOpts = newOptions(card, 6)
-				addHeader(card, "Health check", silent.HealthCheck, function(v)
-					silent.HealthCheck = v
-					hOpts.setOpen(v, true)
-				end, 5)
-				addSlider(hOpts.group, 1, "Minimum health", 1, 100, silent.MinHealth, "%", function(v)
-					silent.MinHealth = v
-				end)
-				hOpts.height += SLIDER_H
-				hOpts.setOpen(silent.HealthCheck, false)
-			end
-		end
-
-		-- ====================================================
 		-- Trigger page
 		-- ====================================================
 		do
@@ -1706,7 +1484,6 @@ return function(lib)
 			cfg.Enabled = false
 			trig.Enabled = false
 			graphPanel.Destroy()
-			hookAlive = false
 			for _, conn in ipairs(connections) do
 				conn:Disconnect()
 			end
