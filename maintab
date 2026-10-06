@@ -1299,10 +1299,7 @@ return function(lib)
 					cfg.Sticky = v
 					releaseLock()
 				end)
-				addSwitchRow(opts.group, 7, "Always active", cfg.AlwaysActive, function(v)
-					cfg.AlwaysActive = v
-				end)
-				opts.height += METHODS_H * 3 + KEY_H + SLIDER_H + SWITCH_H * 2
+				opts.height += METHODS_H * 3 + KEY_H + SLIDER_H + SWITCH_H
 				opts.setOpen(cfg.Enabled, false)
 			end
 
