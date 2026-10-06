@@ -5,12 +5,14 @@
 --
 -- Movement page (scrollable). Every feature's settings stay hidden until its switch is
 -- on, then they slide open (and slide shut again when it's turned off):
---   No-Clip   switch + keybind
---   Inf Jump  switch   -> power + cooldown   (infinite double jump: press jump in the air)
---   Speed     switch + keybind -> method (Velocity / Slippery) + amount
---   Flight    switch + keybind -> method (Velocity / Position) + amount
---   Jump      switch   -> jump power         (higher ground jumps)
---   Gravity   switch   -> gravity            (client-side workspace gravity)
+--   No-Clip          switch + keybind
+--   Inf Jump         switch   -> power + cooldown   (infinite double jump: press jump in the air)
+--   Speed            switch + keybind -> method (Velocity / Slippery) + amount
+--   Flight           switch + keybind -> method (Velocity / Position) + amount
+--   Jump             switch   -> jump power         (higher ground jumps)
+--   Gravity          switch   -> gravity            (client-side workspace gravity)
+--   No Slowdown      switch   (WalkSpeed can't be lowered, enforced every physics step)
+--   No Jump Cooldown switch   (no landing delay, hold jump to bunny hop, undoes game jump locks)
 --
 -- keybind rule: switch ON + a key set  -> the key toggles the feature (switch only arms it)
 --               switch ON + no key set -> the switch itself toggles it
@@ -620,70 +622,188 @@ return function(lib)
 			end
 		end
 
+		-- ----------------------------------------------------
 		-- No Slowdown (switch-only)
-		-- Stores the player's intended WalkSpeed when toggled on, then uses a
-		-- WalkSpeed property-changed signal for instant reaction instead of polling.
+		-- WalkSpeed is the speed the character walks at. When the switch turns on we remember it
+		-- (noSlow._base) and from then on it can only go up, never below that:
+		--   * the WalkSpeed changed-signal snaps it back the moment something lowers it
+		--   * enforceNoSlow() also runs every Stepped (right BEFORE physics) and every Heartbeat,
+		--     so even games that set WalkSpeed again every frame, or whose signals run deferred,
+		--     never get a physics step at the slowed speed
+		-- ----------------------------------------------------
 		local noSlowConn
+		local function wireNoSlow(hum)
+			if noSlowConn then
+				noSlowConn:Disconnect()
+				noSlowConn = nil
+			end
+			if not (noSlow.active and hum) then
+				return
+			end
+			noSlow._base = hum.WalkSpeed
+			noSlowConn = hum:GetPropertyChangedSignal("WalkSpeed"):Connect(function()
+				local base = noSlow._base
+				if not (noSlow.active and base) then
+					return
+				end
+				if hum.WalkSpeed < base then
+					hum.WalkSpeed = base
+				else
+					noSlow._base = hum.WalkSpeed -- a legit speed-up (sprint, boost...) becomes the new floor
+				end
+			end)
+		end
+
+		local function enforceNoSlow()
+			if not noSlow.active then
+				return
+			end
+			local _, hum = getChar()
+			if not hum or hum.Health <= 0 then
+				return
+			end
+			local base = noSlow._base
+			if not base then
+				noSlow._base = hum.WalkSpeed
+			elseif hum.WalkSpeed < base then
+				hum.WalkSpeed = base
+			elseif hum.WalkSpeed > base then
+				noSlow._base = hum.WalkSpeed
+			end
+		end
+
 		do
 			local card = newCard(7)
 			addHeader(card, noSlow, "No Slowdown")
-
-			local function wireNoSlow(hum)
-				if noSlowConn then noSlowConn:Disconnect(); noSlowConn = nil end
-				if not (noSlow.active and hum) then return end
-				-- Snapshot the speed the moment we enable (before the game can touch it).
-				noSlow._baseSpeed = hum.WalkSpeed
-				noSlowConn = hum:GetPropertyChangedSignal("WalkSpeed"):Connect(function()
-					-- If anything outside of us lowers WalkSpeed, snap it back instantly.
-					if noSlow.active and noSlow._baseSpeed and hum.WalkSpeed < noSlow._baseSpeed then
-						hum.WalkSpeed = noSlow._baseSpeed
-					elseif noSlow.active and noSlow._baseSpeed and hum.WalkSpeed > noSlow._baseSpeed then
-						-- Track intentional upward changes (e.g. the Speed feature).
-						noSlow._baseSpeed = hum.WalkSpeed
-					end
-				end)
-			end
-
 			noSlow.onChange = function(active)
 				if active then
 					local _, hum = getChar()
 					wireNoSlow(hum)
 				else
-					if noSlowConn then noSlowConn:Disconnect(); noSlowConn = nil end
-					noSlow._baseSpeed = nil
+					if noSlowConn then
+						noSlowConn:Disconnect()
+						noSlowConn = nil
+					end
+					noSlow._base = nil
 				end
 			end
-			-- expose wireNoSlow so CharacterAdded can re-wire it
 			noSlow._wire = wireNoSlow
 		end
 
+		-- ----------------------------------------------------
 		-- No Jump Cooldown (switch-only)
-		-- Catches both Landed and GettingUp states (the two states that block jumping)
-		-- and immediately forces the humanoid back to Running — synchronously, no defer.
+		-- Three things stop you from jumping again right away:
+		--   1. the landing delay        -> the Landed state is switched off while this is on
+		--   2. a game-side jump lock    -> the Jumping state is switched back on, and a jump power
+		--                                  that the game set to 0 is restored
+		--   3. having to re-press jump  -> holding jump (key or mobile button) jumps the moment you
+		--                                  touch the ground
+		-- Everything is enforced every Stepped / Heartbeat, so it also beats games that re-apply
+		-- their lock every frame. (A cooldown the SERVER checks can't be removed from the client.)
+		-- ----------------------------------------------------
 		local jumpCDStateConn
+		local STATE_JUMPING = Enum.HumanoidStateType.Jumping
+		local STATE_LANDED = Enum.HumanoidStateType.Landed
+
+		-- jump now if standing on something (does nothing in the air, while sitting or already jumping)
+		local function groundJump(hum)
+			if hum.Health <= 0 or hum.Sit then
+				return
+			end
+			if hum.FloorMaterial ~= Enum.Material.Air and hum:GetState() ~= STATE_JUMPING then
+				pcall(function()
+					hum:ChangeState(STATE_JUMPING)
+				end)
+			end
+		end
+
+		local function wireJumpCD(hum)
+			if jumpCDStateConn then
+				jumpCDStateConn:Disconnect()
+				jumpCDStateConn = nil
+			end
+			if not (noJumpCD.active and hum) then
+				return
+			end
+			noJumpCD._hum = hum
+			noJumpCD._landedWas = hum:GetStateEnabled(STATE_LANDED)
+			local power = hum.UseJumpPower and hum.JumpPower or hum.JumpHeight
+			noJumpCD._power = power > 0 and power or nil
+			pcall(function()
+				hum:SetStateEnabled(STATE_LANDED, false)
+			end)
+			-- if a landing / get-up still sneaks through, skip straight back to running
+			jumpCDStateConn = hum.StateChanged:Connect(function(_, new)
+				if noJumpCD.active and (new == STATE_LANDED or new == Enum.HumanoidStateType.GettingUp) then
+					pcall(function()
+						hum:ChangeState(Enum.HumanoidStateType.Running)
+					end)
+				end
+			end)
+		end
+
+		local function enforceJumpCD()
+			if not noJumpCD.active then
+				return
+			end
+			local _, hum = getChar()
+			if not hum or hum.Health <= 0 then
+				return
+			end
+			if noJumpCD._hum ~= hum then
+				wireJumpCD(hum) -- the humanoid was replaced
+			end
+
+			-- keep the landing delay off and the jumping state on, even if the game flips them back
+			pcall(function()
+				if hum:GetStateEnabled(STATE_LANDED) then
+					hum:SetStateEnabled(STATE_LANDED, false)
+				end
+				if not hum:GetStateEnabled(STATE_JUMPING) then
+					hum:SetStateEnabled(STATE_JUMPING, true)
+				end
+			end)
+
+			-- a game-side cooldown often zeroes the jump strength: remember the last good value, put it back
+			local power = hum.UseJumpPower and hum.JumpPower or hum.JumpHeight
+			if power > 0 then
+				noJumpCD._power = power
+			elseif noJumpCD._power and not jump.active then
+				if hum.UseJumpPower then
+					hum.JumpPower = noJumpCD._power
+				else
+					hum.JumpHeight = noJumpCD._power
+				end
+			end
+
+			-- holding jump = jump again the moment you land
+			local holding = hum.Jump
+				or (UserInputService:IsKeyDown(Enum.KeyCode.Space) and UserInputService:GetFocusedTextBox() == nil)
+			if holding then
+				groundJump(hum)
+			end
+		end
+
 		do
 			local card = newCard(8)
 			addHeader(card, noJumpCD, "No Jump Cooldown")
-
-			local function wireJumpCD(hum)
-				if jumpCDStateConn then jumpCDStateConn:Disconnect(); jumpCDStateConn = nil end
-				if not (noJumpCD.active and hum) then return end
-				jumpCDStateConn = hum.StateChanged:Connect(function(_, new)
-					if not noJumpCD.active then return end
-					if new == Enum.HumanoidStateType.Landed
-						or new == Enum.HumanoidStateType.GettingUp then
-						-- Synchronous — no defer, no delay. Skip straight to Running.
-						hum:ChangeState(Enum.HumanoidStateType.Running)
-					end
-				end)
-			end
-
 			noJumpCD.onChange = function(active)
 				if active then
 					local _, hum = getChar()
 					wireJumpCD(hum)
 				else
-					if jumpCDStateConn then jumpCDStateConn:Disconnect(); jumpCDStateConn = nil end
+					if jumpCDStateConn then
+						jumpCDStateConn:Disconnect()
+						jumpCDStateConn = nil
+					end
+					local hum = noJumpCD._hum
+					if hum and hum.Parent then
+						pcall(function()
+							hum:SetStateEnabled(STATE_LANDED, noJumpCD._landedWas ~= false)
+						end)
+					end
+					noJumpCD._hum = nil
+					noJumpCD._power = nil
 				end
 			end
 			noJumpCD._wire = wireJumpCD
@@ -734,17 +854,24 @@ return function(lib)
 		end)
 
 		-- ====================================================
-		-- Inf Jump: press jump in the air -> jump again (no limit)
+		-- jump requests: No Jump Cooldown (ground) + Inf Jump (air)
 		-- ====================================================
 		local jumpBoosted = false -- true from a jump until you touch the ground again
 		local lastAirJump = 0
 
 		local jumpConn = UserInputService.JumpRequest:Connect(function()
-			if not infJump.active then
-				return
-			end
 			local _, hum, root = getChar()
 			if not (hum and root) or hum.Health <= 0 then
+				return
+			end
+
+			-- No Jump Cooldown: a tap right after landing jumps immediately
+			if noJumpCD.active then
+				groundJump(hum)
+			end
+
+			-- Inf Jump: press jump in the air -> jump again (no limit)
+			if not infJump.active then
 				return
 			end
 			-- on the ground the normal jump handles it
@@ -786,10 +913,15 @@ return function(lib)
 			end
 		end
 		local gravitySignal = workspace:GetPropertyChangedSignal("Gravity"):Connect(pushGravity)
-		local renderConn = RunService.RenderStepped:Connect(pushGravity)
+		local renderConn = RunService.RenderStepped:Connect(function()
+			pushGravity()
+			enforceNoSlow()
+		end)
 
 		local steppedConn = RunService.Stepped:Connect(function()
 			pushGravity()
+			enforceNoSlow()    -- right before physics: the slowed WalkSpeed never gets simulated
+			enforceJumpCD()    -- right before physics: jump states / power are correct for this step
 			if not noclip.active then
 				return
 			end
@@ -847,6 +979,8 @@ return function(lib)
 
 		local heartbeatConn = RunService.Heartbeat:Connect(function(dt)
 			pushGravity()
+			enforceNoSlow()
+			enforceJumpCD()
 
 			local char, hum, root = getChar()
 			if not (char and hum and root) or hum.Health <= 0 then
@@ -891,9 +1025,10 @@ return function(lib)
 			restoreFriction()
 			table.clear(noclipParts)
 			jumpBoosted = false
-			noSlow._baseSpeed = nil
+			noSlow._base = nil
+			noJumpCD._hum = nil
 
-			-- re-wire both signal-based features to the new humanoid
+			-- re-wire both features to the new humanoid
 			local hum = char:WaitForChild("Humanoid", 5)
 			noSlow._wire(hum)
 			noJumpCD._wire(hum)
