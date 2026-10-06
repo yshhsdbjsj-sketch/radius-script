@@ -304,18 +304,18 @@ return function(lib)
 			["[TacticalShotgun]"]  = true,
 		}
 
-		local RATE_MIN, RATE_MAX = 1, 100
-		local rate     = 15
+		local function isWallet(tool)
+			return tool ~= nil and tool.Name:lower() == "[wallet]"
+		end
+
+		local DELAY_MIN, DELAY_MAX = 1, 1000 -- milliseconds between shots
+		local delayMs  = 50
 		local rapidOn  = false
-		local noSlowOn = false
 
 		local selectedTool -- what you picked in the grid
 		local equippedGun  -- the equipped tool, if it's one of GUNS (this is what fires)
-		local gunConns = {}
 		local mouseHeld, firing = false, false
 		local fireAcc = 0
-		local lastAction = 0
-		local baseSpeed
 
 		local SIDE_W, SIDE_GAP = 260, 8
 
@@ -366,12 +366,27 @@ return function(lib)
 		panelDivider.Size = UDim2.new(1, -24, 0, 1)
 		panelDivider.Parent = panel
 
-		-- ---------- vertical fire-rate slider (left column) ----------
+		-- the panel has two views: gun mods and wallet
+		local gunView = Instance.new("Frame")
+		gunView.Name = "GunView"
+		gunView.BackgroundTransparency = 1
+		gunView.Size = UDim2.fromScale(1, 1)
+		gunView.Visible = false
+		gunView.Parent = panel
+
+		local walletView = Instance.new("Frame")
+		walletView.Name = "WalletView"
+		walletView.BackgroundTransparency = 1
+		walletView.Size = UDim2.fromScale(1, 1)
+		walletView.Visible = false
+		walletView.Parent = panel
+
+		-- ---------- vertical fire-delay slider (left column) ----------
 		local sliderArea = Instance.new("Frame")
 		sliderArea.BackgroundTransparency = 1
 		sliderArea.Position = UDim2.fromOffset(14, 52)
 		sliderArea.Size = UDim2.new(0, 96, 1, -66)
-		sliderArea.Parent = panel
+		sliderArea.Parent = gunView
 
 		local rateValue = Instance.new("TextLabel")
 		rateValue.BackgroundTransparency = 1
@@ -414,19 +429,19 @@ return function(lib)
 		rateCaption.Position = UDim2.fromScale(0, 1)
 		rateCaption.Size = UDim2.new(1, 0, 0, 18)
 		rateCaption.Font = Enum.Font.GothamMedium
-		rateCaption.Text = "Fire rate"
+		rateCaption.Text = "Fire delay"
 		rateCaption.TextColor3 = TEXT_DIM
 		rateCaption.TextSize = 12
 		rateCaption.Parent = sliderArea
 
 		local function setRate(v)
-			rate = math.clamp(math.floor(v + 0.5), RATE_MIN, RATE_MAX)
-			local a = (rate - RATE_MIN) / (RATE_MAX - RATE_MIN)
+			delayMs = math.clamp(math.floor(v + 0.5), DELAY_MIN, DELAY_MAX)
+			local a = (delayMs - DELAY_MIN) / (DELAY_MAX - DELAY_MIN)
 			fill.Size = UDim2.fromScale(1, a)
 			knob.Position = UDim2.fromScale(0.5, 1 - a)
-			rateValue.Text = rate .. "/s"
+			rateValue.Text = delayMs .. " ms"
 		end
-		setRate(rate)
+		setRate(delayMs)
 
 		local sliderHit = Instance.new("TextButton")
 		sliderHit.BackgroundTransparency = 1
@@ -445,7 +460,7 @@ return function(lib)
 				return
 			end
 			local fromTop = math.clamp((mousePos().Y - track.AbsolutePosition.Y) / h, 0, 1)
-			setRate(RATE_MIN + (1 - fromTop) * (RATE_MAX - RATE_MIN))
+			setRate(DELAY_MIN + (1 - fromTop) * (DELAY_MAX - DELAY_MIN))
 		end
 
 		sliderHit.InputBegan:Connect(function(input)
@@ -472,7 +487,7 @@ return function(lib)
 			row.Size = UDim2.new(1, -136, 0, 58)
 			row.BackgroundColor3 = TILE_BG
 			row.BorderSizePixel = 0
-			row.Parent = panel
+			row.Parent = gunView
 			addCorner(row)
 			addStroke(row, STROKE)
 
@@ -535,14 +550,10 @@ return function(lib)
 				firing = false
 			end
 		end)
-		makeToggle("No slowdown", 120, function(on)
-			noSlowOn = on
-			baseSpeed = nil
-		end)
 
 		local hint = Instance.new("TextLabel")
 		hint.BackgroundTransparency = 1
-		hint.Position = UDim2.fromOffset(122, 190)
+		hint.Position = UDim2.fromOffset(122, 120)
 		hint.Size = UDim2.new(1, -136, 0, 48)
 		hint.Font = Enum.Font.Gotham
 		hint.Text = ""
@@ -551,7 +562,7 @@ return function(lib)
 		hint.TextWrapped = true
 		hint.TextXAlignment = Enum.TextXAlignment.Left
 		hint.TextYAlignment = Enum.TextYAlignment.Top
-		hint.Parent = panel
+		hint.Parent = gunView
 
 		local statusLabel = Instance.new("TextLabel")
 		statusLabel.BackgroundTransparency = 1
@@ -563,7 +574,7 @@ return function(lib)
 		statusLabel.TextColor3 = Color3.fromRGB(235, 90, 90)
 		statusLabel.TextSize = 11
 		statusLabel.TextXAlignment = Enum.TextXAlignment.Left
-		statusLabel.Parent = panel
+		statusLabel.Parent = gunView
 
 		-- the game's own gun module (used for the rapid-fire shots)
 		local gunHandler
@@ -579,15 +590,159 @@ return function(lib)
 			end
 		end)
 
+		-- ---------- wallet view: amount box + Drop button ----------
+		local FIELD_STROKE = Color3.fromRGB(46, 46, 51)
+		local FIELD_FOCUS = Color3.fromRGB(95, 95, 104)
+
+		local amountCaption = Instance.new("TextLabel")
+		amountCaption.BackgroundTransparency = 1
+		amountCaption.Position = UDim2.fromOffset(14, 52)
+		amountCaption.Size = UDim2.new(1, -28, 0, 16)
+		amountCaption.Font = Enum.Font.GothamMedium
+		amountCaption.Text = "Amount"
+		amountCaption.TextColor3 = TEXT_DIM
+		amountCaption.TextSize = 12
+		amountCaption.TextXAlignment = Enum.TextXAlignment.Left
+		amountCaption.Parent = walletView
+
+		local amountBox = Instance.new("TextBox")
+		amountBox.Name = "AmountBox"
+		amountBox.Position = UDim2.fromOffset(14, 72)
+		amountBox.Size = UDim2.new(1, -28, 0, 38)
+		amountBox.BackgroundColor3 = TILE_BG
+		amountBox.BorderSizePixel = 0
+		amountBox.ClearTextOnFocus = false
+		amountBox.Font = Enum.Font.GothamMedium
+		amountBox.PlaceholderText = "1 - 10000"
+		amountBox.PlaceholderColor3 = Color3.fromRGB(95, 95, 101)
+		amountBox.Text = ""
+		amountBox.TextColor3 = TEXT_MAIN
+		amountBox.TextSize = 14
+		amountBox.TextXAlignment = Enum.TextXAlignment.Left
+		amountBox.Parent = walletView
+		addCorner(amountBox)
+		local amountStroke = addStroke(amountBox, FIELD_STROKE)
+
+		local amountPad = Instance.new("UIPadding")
+		amountPad.PaddingLeft = UDim.new(0, 12)
+		amountPad.PaddingRight = UDim.new(0, 12)
+		amountPad.Parent = amountBox
+
+		local dropBtn = Instance.new("TextButton")
+		dropBtn.Name = "Drop"
+		dropBtn.Position = UDim2.fromOffset(14, 120)
+		dropBtn.Size = UDim2.new(1, -28, 0, 38)
+		dropBtn.BackgroundColor3 = Color3.fromRGB(36, 36, 41)
+		dropBtn.BorderSizePixel = 0
+		dropBtn.AutoButtonColor = false
+		dropBtn.Font = Enum.Font.GothamMedium
+		dropBtn.Text = "Drop"
+		dropBtn.TextColor3 = Color3.fromRGB(215, 215, 220)
+		dropBtn.TextSize = 14
+		dropBtn.Parent = walletView
+		addCorner(dropBtn)
+		local dropStroke = addStroke(dropBtn, FIELD_STROKE)
+
+		local walletStatus = Instance.new("TextLabel")
+		walletStatus.BackgroundTransparency = 1
+		walletStatus.Position = UDim2.fromOffset(14, 166)
+		walletStatus.Size = UDim2.new(1, -28, 0, 16)
+		walletStatus.Font = Enum.Font.Gotham
+		walletStatus.Text = ""
+		walletStatus.TextColor3 = TEXT_DIM
+		walletStatus.TextSize = 11
+		walletStatus.TextXAlignment = Enum.TextXAlignment.Left
+		walletStatus.Parent = walletView
+
+		amountBox.Focused:Connect(function()
+			TweenService:Create(amountStroke, fadeInfo, {Color = FIELD_FOCUS}):Play()
+		end)
+		dropBtn.MouseEnter:Connect(function()
+			TweenService:Create(dropBtn, fadeInfo, {BackgroundColor3 = Color3.fromRGB(48, 48, 55), TextColor3 = TEXT_MAIN}):Play()
+			TweenService:Create(dropStroke, fadeInfo, {Color = FIELD_FOCUS}):Play()
+		end)
+		dropBtn.MouseLeave:Connect(function()
+			TweenService:Create(dropBtn, fadeInfo, {BackgroundColor3 = Color3.fromRGB(36, 36, 41), TextColor3 = Color3.fromRGB(215, 215, 220)}):Play()
+			TweenService:Create(dropStroke, fadeInfo, {Color = FIELD_STROKE}):Play()
+		end)
+
+		-- digits only, capped at 10000
+		local cleaning = false
+		amountBox:GetPropertyChangedSignal("Text"):Connect(function()
+			if cleaning then
+				return
+			end
+			local clean = amountBox.Text:gsub("%D", "")
+			if #clean > 5 then
+				clean = clean:sub(1, 5)
+			end
+			if tonumber(clean) and tonumber(clean) > 10000 then
+				clean = "10000"
+			end
+			if clean ~= amountBox.Text then
+				cleaning = true
+				amountBox.Text = clean
+				cleaning = false
+			end
+		end)
+
+		-- drops the cash straight through the game's remote - the wallet does not need to be equipped
+		local dropBusy = false
+		local function doDrop()
+			if dropBusy then
+				return
+			end
+			local amount = tonumber(amountBox.Text)
+			if not amount or amount < 1 then
+				walletStatus.TextColor3 = Color3.fromRGB(235, 90, 90)
+				walletStatus.Text = "Enter a number from 1 to 10000"
+				return
+			end
+			amount = math.min(math.floor(amount), 10000)
+
+			local rs = game:GetService("ReplicatedStorage")
+			local remotes = rs:FindFirstChild("MainRemotes")
+			local remote = remotes and remotes:FindFirstChild("MainRemoteEvent")
+			if not remote then
+				walletStatus.TextColor3 = Color3.fromRGB(235, 90, 90)
+				walletStatus.Text = "MainRemoteEvent not found"
+				return
+			end
+
+			dropBusy = true
+			local ok = pcall(function()
+				remote:FireServer("DropMoney", tostring(amount))
+			end)
+			walletStatus.TextColor3 = ok and TEXT_DIM or Color3.fromRGB(235, 90, 90)
+			walletStatus.Text = ok and ("Dropped $" .. amount) or "Drop failed"
+			task.delay(0.1, function()
+				dropBusy = false
+			end)
+		end
+
+		dropBtn.MouseButton1Click:Connect(doDrop)
+		amountBox.FocusLost:Connect(function(enterPressed)
+			TweenService:Create(amountStroke, fadeInfo, {Color = FIELD_STROKE}):Play()
+			if enterPressed then
+				doDrop()
+			end
+		end)
+
 		-- ---------- show / hide the panel ----------
 		local panelShown = false
 		local function updatePanel()
 			local isGun = selectedTool ~= nil and GUNS[selectedTool.Name] == true
-			local want = isGun and page.Visible
-			if isGun then
+			local isWal = isWallet(selectedTool)
+			local want = (isGun or isWal) and page.Visible
+			if isGun or isWal then
 				panelGun.Text = selectedTool.Name
+				panelTitle.Text = isWal and "WALLET" or "GUN MODS"
+				gunView.Visible = isGun
+				walletView.Visible = isWal
+			end
+			if isGun then
 				local equipped = selectedTool.Parent == lp.Character
-				hint.Text = equipped and "Hold left mouse to fire at the set rate." or "Equip this tool to use these mods."
+				hint.Text = equipped and "Hold left mouse to fire with the set delay." or "Equip this tool to use these mods."
 			end
 			if want == panelShown then
 				return
@@ -622,37 +777,18 @@ return function(lib)
 		end))
 
 		-- ---------- the equipped gun (this is the one that fires) ----------
-		local function clearGunConns()
-			for _, c in ipairs(gunConns) do
-				c:Disconnect()
-			end
-			table.clear(gunConns)
-		end
-
 		local function setEquippedGun(tool)
 			if tool == equippedGun then
 				return
 			end
-			clearGunConns()
 			equippedGun = tool
-			baseSpeed = nil
-			if tool then
-				table.insert(gunConns, tool.Activated:Connect(function()
-					lastAction = os.clock()
-				end))
-				local ammo = tool:FindFirstChild("Ammo")
-				if ammo and ammo:IsA("ValueBase") then
-					table.insert(gunConns, ammo.Changed:Connect(function()
-						lastAction = os.clock() -- ammo changing = shooting or reloading
-					end))
-				end
-			else
+			if not tool then
 				firing = false
 				mouseHeld = false
 			end
 		end
 
-		-- ---------- rapid fire + no slowdown ----------
+		-- ---------- rapid fire ----------
 		table.insert(conns, UserInputService.InputBegan:Connect(function(input, gp)
 			if gp or not equippedGun then
 				return
@@ -663,8 +799,6 @@ return function(lib)
 					firing = true
 					fireAcc = 0
 				end
-			elseif input.KeyCode == Enum.KeyCode.R then
-				lastAction = os.clock() -- reload
 			end
 		end))
 		table.insert(conns, UserInputService.InputEnded:Connect(function(input)
@@ -688,26 +822,9 @@ return function(lib)
 			if not gun or gun.Parent ~= lp.Character then
 				return
 			end
-			local now = os.clock()
-			if mouseHeld then
-				lastAction = now
-			end
-
-			-- no slowdown: while shooting/reloading, keep the speed you had before
-			if noSlowOn then
-				local hum = lp.Character and lp.Character:FindFirstChildOfClass("Humanoid")
-				if hum then
-					if now - lastAction > 3 then
-						baseSpeed = hum.WalkSpeed
-					elseif baseSpeed and hum.WalkSpeed < baseSpeed then
-						hum.WalkSpeed = baseSpeed
-					end
-				end
-			end
-
-			-- rapid fire: `rate` shots per second while the mouse is held
+			-- rapid fire: one shot every `delayMs` milliseconds while the mouse is held
 			if firing and rapidOn then
-				local interval = 1 / rate
+				local interval = delayMs / 1000
 				fireAcc += dt
 				local n = 0
 				while fireAcc >= interval and n < 10 do
@@ -1042,7 +1159,6 @@ return function(lib)
 			for _, c in ipairs(invConns) do c:Disconnect() end
 			for _, c in ipairs(conns) do c:Disconnect() end
 			table.clear(conns)
-			clearGunConns()
 			firing = false
 			clearPreview()
 		end)
