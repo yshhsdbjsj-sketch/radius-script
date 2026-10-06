@@ -204,9 +204,9 @@ return function(lib)
 		-- ====================================================
 		local cfg = {
 			Enabled = false,
-			TeamCheck = true,
-			VisibleCheck = true,
-			IgnoreTransparency = true,
+			TeamCheck = false,
+			VisibleCheck = false,
+			IgnoreTransparency = false,
 			IgnoredTransparency = 0.5, -- parts more transparent than this don't block the visible check
 			Keybind = "MouseButton2",
 			AimType = "Hold", -- "Hold" or "Toggle"
@@ -1054,14 +1054,13 @@ return function(lib)
 		-- ====================================================
 		local function buildGraphPanel()
 			local SIDE_W, SIDE_GAP = 260, 8
-			local PLOT_X, PLOT_Y, PLOT_W, PLOT_H = 44, 74, 200, 130
+			local PLOT_X, PLOT_Y, PLOT_W, PLOT_H = 44, 70, 200, 196
 			local COL_X, COL_Y = Color3.fromRGB(235, 235, 240), Color3.fromRGB(110, 160, 255)
-			local PRED_MAX_SPEED, PRED_MAX_LEAD = 50, 10 -- studs/s, studs
-			local SMOOTH_MAX_T = 0.5 -- seconds
-			local POINTS = 32
+			local GRAPH_T = 0.5 -- seconds shown on the x axis of both graphs
+			local POINTS = 90
 
 			local MODES = {
-				Prediction = {sub = "Lead distance vs target speed", yTop = "10 st", yMid = "5", yBot = "0", xRight = "50 st/s"},
+				Prediction = {sub = "Lead built up over time", yTop = "0.20 s", yMid = "0.10", yBot = "0", xRight = "0.5 s"},
 				Smoothness = {sub = "Aim error left over time", yTop = "100%", yMid = "50%", yBot = "0", xRight = "0.5 s"},
 			}
 
@@ -1142,6 +1141,7 @@ return function(lib)
 					f.BackgroundColor3 = color
 					f.BorderSizePixel = 0
 					f.ZIndex = 3
+					addCorner(f, 1)
 					f.Parent = plot
 					segs[i] = f
 				end
@@ -1156,21 +1156,6 @@ return function(lib)
 				end
 			end
 			local drawX, drawY = newLine(COL_X), newLine(COL_Y)
-
-			-- legend rows
-			local function legendRow(y, color, name)
-				local dot = Instance.new("Frame")
-				dot.Position = UDim2.fromOffset(16, y + 4)
-				dot.Size = UDim2.fromOffset(8, 8)
-				dot.BackgroundColor3 = color
-				dot.BorderSizePixel = 0
-				dot.Parent = side
-				addCorner(dot, 4)
-				text(side, name, 12, TEXT_SOFT, Enum.Font.GothamMedium, 30, y, 100, 16)
-				return text(side, "", 12, TEXT_MAIN, Enum.Font.GothamMedium, 110, y, SIDE_W - 126, 16, right)
-			end
-			local valX = legendRow(236, COL_X, "X axis")
-			local valY = legendRow(258, COL_Y, "Y axis")
 
 			-- state
 			local mode = "Prediction"
@@ -1190,9 +1175,10 @@ return function(lib)
 					local t = i / (POINTS - 1)
 					local y
 					if mode == "Prediction" then
-						y = math.clamp(t * PRED_MAX_SPEED * (v / 100) / PRED_MAX_LEAD, 0, 1)
+						-- velocity estimate catches up (rate 12/s), scaled to the lead setting
+						y = (v / 20) * (1 - math.exp(-12 * t * GRAPH_T))
 					else
-						y = (1 - 1 / math.max(v, 1)) ^ (t * SMOOTH_MAX_T * 60)
+						y = (1 - 1 / math.max(v, 1)) ^ (t * GRAPH_T * 60)
 					end
 					pts[i + 1] = Vector2.new(t * PLOT_W, (1 - y) * PLOT_H)
 				end
@@ -1209,14 +1195,6 @@ return function(lib)
 			local function redraw()
 				drawX(curve(shownX))
 				drawY(curve(shownY))
-				local tx, ty = targets()
-				if mode == "Prediction" then
-					valX.Text = string.format("%.2f s lead", tx / 100)
-					valY.Text = string.format("%.2f s lead", ty / 100)
-				else
-					valX.Text = tostring(tx)
-					valY.Text = tostring(ty)
-				end
 			end
 
 			local conn = RunService.RenderStepped:Connect(function(dt)
