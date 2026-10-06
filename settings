@@ -16,7 +16,8 @@
 --   * the whole Visuals tab is a single "ESP" entry (master switch + at least one ESP on)
 --   * while the menu is OPEN you can drag the list anywhere; while the menu is HIDDEN it stays
 --     where it is until you open the menu again
---   * modules add themselves with lib.registerKeybind({name, getEnabled, getActive?, getKey?})
+--   * modules add themselves with lib.registerKeybind({name, getEnabled, getActive?, getKey?});
+--     older Movement / Visuals files that don't do that are read straight from their pages instead
 
 return function(lib)
 	local Players = lib.Players
@@ -333,8 +334,106 @@ return function(lib)
 		emptyLabel.Parent = listFrame
 
 		-- one row per registered module
-		local entries = lib.keybindEntries or {}
+		local entries = {} -- every module shown in the list (registered ones + scanned ones)
+		local known = {}
 		local rows = {} -- [index] = {frame, name, chip, shown, active, key}
+
+		local function addEntry(e)
+			if not known[e] then
+				known[e] = true
+				table.insert(entries, e)
+			end
+		end
+
+		-- ------------------------------------------------
+		-- fallback for older Movement / Visuals files that do not register themselves:
+		-- the list reads their switches (and key buttons) straight from the pages.
+		-- Modules that DO register are never scanned.
+		-- ------------------------------------------------
+		local scanned = {} -- [name] = state of an entry created by the scan
+		local MOVE_NAMES = {["Jump"] = "Jump Power"}
+
+		local function switchOn(btn)
+			return btn.BackgroundColor3.R > 0.5 -- on = light track, off = dark track
+		end
+
+		local function scannedState(name)
+			local st = scanned[name]
+			if not st then
+				st = {enabled = false, key = nil}
+				scanned[name] = st
+				addEntry({
+					name = name,
+					getEnabled = function() return st.enabled end,
+					getKey = function() return st.key end,
+				})
+			end
+			return st
+		end
+
+		local function scanPages()
+			local registered = {}
+			for _, e in ipairs(lib.keybindEntries or {}) do
+				registered[e.name] = true
+			end
+
+			-- Movement: every card header has a title, a "Switch" and (optionally) a "Keybind" button
+			local movePage = ctx.pages["Movement"]
+			local moveList = movePage and movePage:FindFirstChild("MovementList")
+			if moveList then
+				for _, card in ipairs(moveList:GetChildren()) do
+					if card:IsA("Frame") then
+						for _, row in ipairs(card:GetChildren()) do
+							local switch = row:IsA("Frame") and row:FindFirstChild("Switch")
+							local label = switch and row:FindFirstChildOfClass("TextLabel")
+							if label then
+								local name = MOVE_NAMES[label.Text] or label.Text
+								if not registered[name] then
+									local st = scannedState(name)
+									st.enabled = switchOn(switch)
+									local keyBtn = row:FindFirstChild("Keybind")
+									if keyBtn and keyBtn.Text ~= "..." then
+										st.key = (keyBtn.Text ~= "None" and keyBtn.Text ~= "") and keyBtn.Text or nil
+									end
+								end
+							end
+						end
+					end
+				end
+			end
+
+			-- Visuals: one "ESP" entry = master switch on + at least one ESP feature switch on
+			if not registered["ESP"] then
+				local visPage = ctx.pages["Visuals"]
+				local mainCard = visPage and visPage:FindFirstChild("VisualsCard", true)
+				if mainCard then
+					local masterOn = false
+					for _, row in ipairs(mainCard:GetChildren()) do
+						if row:IsA("Frame") and row.Position.Y.Offset == 0 then
+							local btn = row:FindFirstChildOfClass("TextButton")
+							if btn then
+								masterOn = switchOn(btn)
+							end
+						end
+					end
+
+					local anyOn = false
+					for _, cardName in ipairs({"EspFeaturesCard", "BoxEspCard"}) do
+						local featCard = visPage:FindFirstChild(cardName, true)
+						if featCard then
+							for _, row in ipairs(featCard:GetChildren()) do
+								local btn = row:IsA("Frame") and row:FindFirstChildOfClass("TextButton")
+								local label = btn and row:FindFirstChildOfClass("TextLabel")
+								if label and label.Text ~= "Team Colors" and switchOn(btn) then
+									anyOn = true
+								end
+							end
+						end
+					end
+					scannedState("ESP").enabled = masterOn and anyOn
+				end
+			end
+		end
 
 		local function makeRow(entry, order)
 			local frame = Instance.new("CanvasGroup")
@@ -407,7 +506,19 @@ return function(lib)
 			TweenService:Create(r.chip, rowInfo, {TextColor3 = active and CHIP_ON or CHIP_DIM}):Play()
 		end
 
-		local function updateList()
+		local scanTimer = 0
+		local function updateList(dt)
+			-- pick up modules that registered themselves
+			for _, e in ipairs(lib.keybindEntries or {}) do
+				addEntry(e)
+			end
+			-- fallback scan, about 5 times per second
+			scanTimer += dt
+			if scanTimer >= 0.2 then
+				scanTimer = 0
+				scanPages()
+			end
+
 			local anyShown = false
 			for i, entry in ipairs(entries) do
 				local r = rows[i]
