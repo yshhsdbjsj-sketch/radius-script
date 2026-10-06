@@ -1,0 +1,179 @@
+-- maintab module (Main page): horizontal sub-tabs  AimBot | Silent | Trigger
+-- usage in the main script:
+--   local buildMainTab = loadstring(game:HttpGet(MAINTAB_URL))()(lib)
+--   local mainTabs = buildMainTab({pages = pages, fadeInfo = fadeInfo, slideInfo = slideInfo})
+--
+-- returns:
+--   mainTabs.Pages.AimBot / .Silent / .Trigger  -> empty CanvasGroups, put your content in them
+--   mainTabs.Select("Silent")                   -> switch sub-tab from code
+--   mainTabs.Current()                          -> name of the open sub-tab
+
+return function(lib)
+	local TweenService = lib.TweenService
+	local addCorner, addStroke = lib.addCorner, lib.addStroke
+
+	local SUBTABS = {"AimBot", "Silent", "Trigger"}
+
+	local BAR_BG = Color3.fromRGB(28, 28, 32)
+	local BAR_STROKE = Color3.fromRGB(42, 42, 47)
+	local TAB_IDLE = Color3.fromRGB(140, 140, 146)
+	local TAB_HOVER = Color3.fromRGB(200, 200, 206)
+	local TAB_ACTIVE = lib.TEXT_MAIN
+
+	local BAR_TOP, BAR_H = 62, 34
+	local PAGES_TOP = BAR_TOP + BAR_H + 10
+
+	return function(ctx)
+		local page = ctx.pages["Main"]
+		local slideInfo = ctx.slideInfo
+		local fadeInfo = ctx.fadeInfo
+		local n = #SUBTABS
+
+		-- ====================================================
+		-- horizontal tab bar
+		-- ====================================================
+		local bar = Instance.new("Frame")
+		bar.Name = "SubTabs"
+		bar.Position = UDim2.fromOffset(20, BAR_TOP)
+		bar.Size = UDim2.new(1, -40, 0, BAR_H)
+		bar.BackgroundColor3 = BAR_BG
+		bar.BorderSizePixel = 0
+		bar.Parent = page
+		addCorner(bar)
+		addStroke(bar, BAR_STROKE)
+
+		-- highlight that slides behind the selected tab (same look as the sidebar one)
+		local highlight = Instance.new("Frame")
+		highlight.Name = "Highlight"
+		highlight.Position = UDim2.new(0, 3, 0, 3)
+		highlight.Size = UDim2.new(1 / n, -6, 1, -6)
+		highlight.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+		highlight.BorderSizePixel = 0
+		highlight.ZIndex = 1
+		highlight.Parent = bar
+		addCorner(highlight, math.max(lib.RADIUS - 1, 2))
+		local highlightStroke = addStroke(highlight, Color3.fromRGB(52, 52, 58))
+
+		local fillGradient = Instance.new("UIGradient")
+		fillGradient.Color = ColorSequence.new(Color3.fromRGB(49, 49, 56), Color3.fromRGB(30, 30, 35))
+		fillGradient.Parent = highlight
+
+		local strokeGradient = Instance.new("UIGradient")
+		strokeGradient.Color = ColorSequence.new(Color3.fromRGB(74, 74, 83), Color3.fromRGB(45, 45, 50))
+		strokeGradient.Parent = highlightStroke
+
+		-- ====================================================
+		-- sub-pages
+		-- ====================================================
+		local holder = Instance.new("Frame")
+		holder.Name = "SubPages"
+		holder.BackgroundTransparency = 1
+		holder.BorderSizePixel = 0
+		holder.Position = UDim2.fromOffset(0, PAGES_TOP)
+		holder.Size = UDim2.new(1, 0, 1, -PAGES_TOP)
+		holder.Parent = page
+
+		local buttons, subPages = {}, {}
+		local current
+
+		local function selectSub(name, animate)
+			if current == name then
+				return
+			end
+			current = name
+			local index = table.find(SUBTABS, name)
+
+			local slide = animate and slideInfo or TweenInfo.new(0)
+			TweenService:Create(highlight, slide, {Position = UDim2.new((index - 1) / n, 3, 0, 3)}):Play()
+
+			for tabName, button in pairs(buttons) do
+				TweenService:Create(button, animate and fadeInfo or TweenInfo.new(0), {
+					TextColor3 = tabName == name and TAB_ACTIVE or TAB_IDLE,
+				}):Play()
+			end
+
+			-- cross-fade: the old sub-page drifts up and fades out, the new one rises in
+			for pageName, sub in pairs(subPages) do
+				if pageName == name then
+					sub.Visible = true
+					if animate then
+						sub.Position = UDim2.fromOffset(0, 10)
+						sub.GroupTransparency = 1
+						TweenService:Create(sub, slideInfo, {
+							GroupTransparency = 0,
+							Position = UDim2.fromOffset(0, 0),
+						}):Play()
+					else
+						sub.Position = UDim2.fromOffset(0, 0)
+						sub.GroupTransparency = 0
+					end
+				elseif sub.Visible then
+					local out = TweenService:Create(sub, fadeInfo, {
+						GroupTransparency = 1,
+						Position = UDim2.fromOffset(0, -10),
+					})
+					out.Completed:Connect(function()
+						if current ~= pageName then
+							sub.Visible = false
+						end
+					end)
+					out:Play()
+				end
+			end
+		end
+
+		for i, name in ipairs(SUBTABS) do
+			local button = Instance.new("TextButton")
+			button.Name = name
+			button.Position = UDim2.fromScale((i - 1) / n, 0)
+			button.Size = UDim2.fromScale(1 / n, 1)
+			button.BackgroundTransparency = 1
+			button.AutoButtonColor = false
+			button.Font = Enum.Font.GothamMedium
+			button.Text = name
+			button.TextColor3 = TAB_IDLE
+			button.TextSize = 13
+			button.ZIndex = 2
+			button.Parent = bar
+			buttons[name] = button
+
+			button.MouseEnter:Connect(function()
+				if current ~= name then
+					TweenService:Create(button, fadeInfo, {TextColor3 = TAB_HOVER}):Play()
+				end
+			end)
+			button.MouseLeave:Connect(function()
+				if current ~= name then
+					TweenService:Create(button, fadeInfo, {TextColor3 = TAB_IDLE}):Play()
+				end
+			end)
+			button.MouseButton1Click:Connect(function()
+				selectSub(name, true)
+			end)
+
+			local sub = Instance.new("CanvasGroup")
+			sub.Name = name
+			sub.BackgroundTransparency = 1
+			sub.BorderSizePixel = 0
+			sub.Size = UDim2.fromScale(1, 1)
+			sub.GroupTransparency = 1
+			sub.Visible = false
+			sub.Parent = holder
+			subPages[name] = sub
+		end
+
+		selectSub(SUBTABS[1], false)
+
+		return {
+			Pages = subPages,
+			Select = function(name)
+				if table.find(SUBTABS, name) then
+					selectSub(name, true)
+				end
+			end,
+			Current = function()
+				return current
+			end,
+		}
+	end
+end
