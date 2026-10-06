@@ -3,43 +3,8 @@
 --   local buildBoxEsp = loadstring(game:HttpGet(BOXESP_URL))()(lib)
 --   buildBoxEsp({pages = pages, fadeInfo = fadeInfo, slideInfo = slideInfo, popup = popup})
 --
--- Visuals page (scrolls) = two cards:
---   Card 1:
---     Enabled         master switch - everything else is locked (faded, unclickable) until it is on
---     Team check      only players who are NOT on your team
---     Visible check   only players you can actually see (raycast)
---     Render distance only players closer than this many studs
---   Card 2 (one switch per feature - turning one on opens its settings window under the menu):
---     Box Esp         style (Full / Corners / 3D), color + alpha
---     Box Fill        filled box behind the player, color + alpha
---     Chams           Highlight on the character: style (Fill / Outline / Both), through walls, colors
---     Name Esp        source (Display / Username / Both), font, color + alpha
---     Health Bar      mode (Solid / Gradient), Full / Mid / Low colors
---     Armor Bar       blue bar on the right side of the box (BodyEffects.Armor), color + alpha
---     Health Text     number or percent next to the health bar, font, color + alpha
---     Skeleton Esp    color + alpha, thickness
---     Head Dot        circle on the head (outline / filled), color + alpha
---     Look Direction  line from the head showing where the player is facing, color + alpha
---     Tracers         line from the screen to every player, origin, color + alpha
---     Off-screen Arrows  arrows around the crosshair pointing at players outside the screen
---     Distance Text   distance under the player, font, color + alpha
---     Weapon Text     the tool the player holds, under the player, font, color + alpha
---     Team Colors     one color for teammates, one for enemies (or the Roblox team color)
---
--- distance fade is always on: everything fades out smoothly as a player gets close to the render distance
---
--- text layout:
---   * Distance Text alone                 -> distance under the player
---   * Weapon Text alone                   -> weapon under the player
---   * both on and Name Esp on             -> distance moves next to the name, weapon under the player
---   * both on and Name Esp off            -> weapon under the player, distance below it
---
--- behaviour:
---   * while the menu is OPEN the features show on the 3D avatar preview
---     (Chams and Off-screen Arrows have no preview - Roblox doesn't render Highlights in viewports)
---   * when the menu is HIDDEN (menu toggle key) they draw on every player that passes the checks
---   * Off-screen Arrows ignore the Visible check (they exist to point at players you can't see)
---   * the preview and the real ESP always use the same colors and styles
+-- FIX: all settings-panel code now lives inside buildPanels(), so the main function
+-- stays under Luau's limit of 200 local variables per function.
 
 return function(lib)
 	local Players = lib.Players
@@ -138,7 +103,6 @@ return function(lib)
 	-- ========================================================
 	-- checks: team / visible
 	-- ========================================================
-	-- true when the player is on your team (no teams in the game = nobody counts as teammate)
 	local function sameTeam(player)
 		local myTeam = LocalPlayer.Team
 		return myTeam ~= nil and player.Team == myTeam
@@ -148,7 +112,6 @@ return function(lib)
 	rayParams.FilterType = Enum.RaycastFilterType.Exclude
 	rayParams.IgnoreWater = true
 
-	-- true if a ray from the camera reaches the head or the body of `char` unblocked
 	local function isVisible(char, camera)
 		local origin = camera.CFrame.Position
 		local myChar = LocalPlayer.Character
@@ -165,13 +128,11 @@ return function(lib)
 		return false
 	end
 
-	-- name of the tool the character is holding (nil = nothing in hand)
 	local function weaponName(char)
 		local tool = char:FindFirstChildOfClass("Tool")
 		return tool and tool.Name or nil
 	end
 
-	-- armor of the character as 0-1 (nil = this game / character has no armor value)
 	local function armorFrac(char)
 		local effects = char:FindFirstChild("BodyEffects")
 		local armor = effects and effects:FindFirstChild("Armor")
@@ -182,28 +143,24 @@ return function(lib)
 	end
 
 	-- ========================================================
-	-- geometry: characters -> line segments / bounds
-	-- (used by both the Drawing ESP and the GUI preview)
+	-- geometry
 	-- ========================================================
-	local segs = {}   -- box segments
+	local segs = {}
 	for i = 1, SEG_MAX do
 		segs[i] = {0, 0, 0, 0}
 	end
-	local bones = {}  -- skeleton segments
+	local bones = {}
 	for i = 1, BONE_MAX do
 		bones[i] = {0, 0, 0, 0}
 	end
-	local tracerSeg = {{0, 0, 0, 0}} -- the single tracer line
-	local lookSeg = {{0, 0, 0, 0}}   -- the single look-direction line
+	local tracerSeg = {{0, 0, 0, 0}}
+	local lookSeg = {{0, 0, 0, 0}}
 
 	local function setSeg(i, ax, ay, bx, by)
 		local s = segs[i]
 		s[1], s[2], s[3], s[4] = ax, ay, bx, by
 	end
 
-	-- project(world) -> x, y, visible
-	-- no vpSize -> normal camera (WorldToViewportPoint)
-	-- vpSize    -> ViewportFrame camera, projected manually with that frame size
 	local function makeProjector(camera, vpSize)
 		if vpSize then
 			local camCF = camera.CFrame
@@ -225,7 +182,6 @@ return function(lib)
 		end
 	end
 
-	-- screen-space bounds of every body part (shared by 2D box, fill, name, health, armor, texts)
 	local bnd = {minX = 0, minY = 0, maxX = 0, maxY = 0}
 
 	local function computeBounds(char, project)
@@ -260,7 +216,6 @@ return function(lib)
 		return true
 	end
 
-	-- 12 edges of a box; corner c (0-7): bit0 = X, bit1 = Y, bit2 = Z (0 = min, 1 = max)
 	local EDGES3D = {}
 	for c = 0, 7 do
 		for _, bit in ipairs({1, 2, 4}) do
@@ -271,7 +226,6 @@ return function(lib)
 	end
 	local cornerX, cornerY = {}, {}
 
-	-- box that rotates with the character (measured in the root part's space)
 	local function computeBox3D(char, project)
 		local parts = char:FindFirstChild("UpperTorso") and R15_PARTS or R6_PARTS
 		local root = char:FindFirstChild("HumanoidRootPart")
@@ -323,8 +277,6 @@ return function(lib)
 		return #EDGES3D
 	end
 
-	-- fills `segs`, returns how many segments to draw (0 = hide)
-	-- hasBounds = computeBounds() succeeded for this character (needed for 2D styles)
 	local function computeBox(char, project, style, hasBounds)
 		if style == "3D" then
 			return computeBox3D(char, project)
@@ -354,7 +306,6 @@ return function(lib)
 		return 4
 	end
 
-	-- fills `bones`, returns how many bones to draw
 	local function computeSkeleton(char, project)
 		local list = char:FindFirstChild("UpperTorso") and R15_BONES or R6_BONES
 		local n = 0
@@ -373,7 +324,6 @@ return function(lib)
 		return n
 	end
 
-	-- fills `tracerSeg` (origin -> feet of the player), returns 1 or 0
 	local function computeTracer(char, project, ox, oy)
 		local root = char:FindFirstChild("HumanoidRootPart")
 			or char:FindFirstChild("UpperTorso")
@@ -390,7 +340,6 @@ return function(lib)
 		return 1
 	end
 
-	-- head circle: returns x, y, radius (nil = head not on screen)
 	local function computeHead(char, project)
 		local head = char:FindFirstChild("Head")
 		if not head then
@@ -405,7 +354,6 @@ return function(lib)
 		return x, y, math.max(r, 2.5)
 	end
 
-	-- fills `lookSeg` (head -> a point in front of the head), returns 1 or 0
 	local function computeLook(char, project)
 		local head = char:FindFirstChild("Head")
 		if not head then
@@ -423,14 +371,11 @@ return function(lib)
 		return 1
 	end
 
-	-- triangle that sits on a ring around the screen center and points at `worldPos`.
-	-- returns the three corner points (tip first), or nil while the player is on screen
 	local function computeArrow(camera, worldPos, vs, size, ringFrac)
 		local sp, onScreen = camera:WorldToViewportPoint(worldPos)
 		if onScreen and sp.X >= 0 and sp.X <= vs.X and sp.Y >= 0 and sp.Y <= vs.Y then
 			return nil
 		end
-		-- direction in camera space also works for players behind you
 		local rel = camera.CFrame:PointToObjectSpace(worldPos)
 		local dx, dy = rel.X, -rel.Y
 		local mag = math.sqrt(dx * dx + dy * dy)
@@ -441,7 +386,7 @@ return function(lib)
 
 		local ring = math.min(vs.X, vs.Y) * ringFrac
 		local cx, cy = vs.X / 2 + dx * ring, vs.Y / 2 + dy * ring
-		local px, py = -dy, dx -- perpendicular to the pointing direction
+		local px, py = -dy, dx
 		local bx, by = cx - dx * size * 0.6, cy - dy * size * 0.6
 		return cx + dx * size, cy + dy * size,
 			bx + px * size * 0.7, by + py * size * 0.7,
@@ -457,7 +402,7 @@ return function(lib)
 		-- ====================================================
 		-- state
 		-- ====================================================
-		local master = false      -- "Enabled": everything below is locked until this is on
+		local master = false
 		local teamCheck = false
 		local visCheck = false
 		local DIST_MIN, DIST_MAX, DIST_STEP = 50, 5000, 50
@@ -478,23 +423,22 @@ return function(lib)
 		for _, key in ipairs(FEATURES) do
 			feat[key] = false
 		end
-		local selected = nil -- which feature's settings window is open
+		local selected = nil
 
-		local style = "Full"          -- Box: Full / Corners / 3D
-		local nameSource = "Display"  -- Name: Display / Username / Both
-		local hpMode = "Gradient"     -- Health bar: Solid / Gradient
-		local hpFormat = "Number"     -- Health text: Number / Percent
-		local skelThick = 1           -- Skeleton line thickness
-		local tracerFrom = "Bottom"   -- Tracers: Bottom / Center / Top / Mouse
-		local teamSource = "Custom"   -- Team colors: Custom / Roblox
-		local headStyle = "Outline"   -- Head dot: Outline / Filled
-		local chamStyle = "Both"      -- Chams: Fill / Outline / Both
-		local chamWalls = "On"        -- Chams through walls: On / Off
-		local arrowSize = "Medium"    -- Arrows: Small / Medium / Large
-		local arrowRadius = "Mid"     -- Arrows: Near / Mid / Far
+		local style = "Full"
+		local nameSource = "Display"
+		local hpMode = "Gradient"
+		local hpFormat = "Number"
+		local skelThick = 1
+		local tracerFrom = "Bottom"
+		local teamSource = "Custom"
+		local headStyle = "Outline"
+		local chamStyle = "Both"
+		local chamWalls = "On"
+		local arrowSize = "Medium"
+		local arrowRadius = "Mid"
 		local fonts = {Name = "UI", HealthText = "UI", Distance = "UI", Weapon = "UI"}
 
-		-- color slots: h/s/v (0-1) + a (1 = opaque, 0 = invisible)
 		local function newSlot(c, a)
 			local hh, ss, vv = rgbToHsv(c)
 			return {h = math.min(hh, 0.999), s = ss, v = vv, a = a or 1}
@@ -519,17 +463,12 @@ return function(lib)
 			head = newSlot(Color3.fromRGB(255, 255, 255)),
 			look = newSlot(Color3.fromRGB(255, 255, 255)),
 			arrow = newSlot(Color3.fromRGB(255, 255, 255)),
-			-- chams: a soft fill with a clean light outline
 			chamFill = newSlot(Color3.fromRGB(190, 190, 200), 0.35),
 			chamOutline = newSlot(Color3.fromRGB(255, 255, 255), 0.9),
 			ally = newSlot(Color3.fromRGB(80, 200, 120)),
 			enemy = newSlot(Color3.fromRGB(235, 70, 70)),
 		}
 
-		-- Team Colors off      -> the feature's own color
-		-- Team Colors "Custom" -> ally / enemy color
-		-- Team Colors "Roblox" -> the player's Roblox team color (no team = the feature's own color)
-		-- player == nil is the preview (shows the enemy color)
 		local function colorFor(slot, player)
 			if feat.TeamColors then
 				if teamSource == "Roblox" then
@@ -555,14 +494,12 @@ return function(lib)
 			return false
 		end
 
-		-- features that need the screen-space bounds of the player
 		local function needsBounds()
 			return feat.BoxFill or feat.Name or feat.Health or feat.Armor or feat.HealthText or feat.Distance or feat.Weapon
 				or (feat.Box and style ~= "3D")
 		end
 
-		-- distance fade (always on): full strength up close, fading to 20% at the render distance
-		local curFade = 1 -- fade of the player that is being drawn right now
+		local curFade = 1
 		local function fadeFor(dist)
 			local start = renderDist * 0.35
 			if dist <= start then
@@ -571,7 +508,6 @@ return function(lib)
 			return 1 - 0.8 * math.clamp((dist - start) / math.max(renderDist - start, 1), 0, 1)
 		end
 
-		-- set to true if your executor's Drawing Transparency is reversed (0 = opaque)
 		local DRAWING_ALPHA_INVERTED = false
 		local function dAlpha(a)
 			return DRAWING_ALPHA_INVERTED and (1 - a) or a
@@ -596,7 +532,7 @@ return function(lib)
 		local OFF_TRACK = Color3.fromRGB(44, 44, 50)
 		local ON_KNOB = Color3.fromRGB(22, 22, 25)
 		local OFF_KNOB = Color3.fromRGB(140, 140, 146)
-		local LOCKED_T = 0.6 -- transparency of a locked control
+		local LOCKED_T = 0.6
 		local ROW_H, SLIDER_H = 44, 56
 
 		local function toHex(c)
@@ -604,11 +540,8 @@ return function(lib)
 		end
 
 		-- ====================================================
-		-- dragging (color pickers + distance slider)
+		-- dragging
 		-- ====================================================
-		-- the pointer coordinate space differs between executors/GUI-inset settings,
-		-- so on press we pick the candidate that actually lies inside the pressed element
-		-- and keep the difference as a calibration offset
 		local GuiService = game:GetService("GuiService")
 		local dragFn
 		local calib = Vector2.new(0, 0)
@@ -643,10 +576,8 @@ return function(lib)
 			return input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch
 		end
 
-		-- fn(mousePosition) runs on press and on every move until release
 		local function bindDrag(hit, fn)
 			hit.InputBegan:Connect(function(input)
-				-- locked while "Enabled" is off
 				if isPress(input) and master then
 					dragFn = fn
 					calibrate(input, hit)
@@ -667,13 +598,12 @@ return function(lib)
 		end)
 
 		-- ====================================================
-		-- Visuals page: card 1 (Enabled / checks / distance) + card 2 (features), inside a scroll frame
+		-- Visuals page
 		-- ====================================================
 		local CARD1_H = 191
 		local CARD_GAP = 10
 		local FEAT_H = #FEATURES * 45 - 1
 
-		-- scrolling container below the page header; both cards live inside it
 		local scroll = Instance.new("ScrollingFrame")
 		scroll.Name = "VisualsScroll"
 		scroll.BackgroundTransparency = 1
@@ -727,8 +657,6 @@ return function(lib)
 			f.Parent = parent or card
 		end
 
-		-- y == nil -> label is vertically centered across the whole row
-		-- y given  -> label sits at that offset with a fixed height (used above the slider)
 		local function addRowLabel(parent, text, y)
 			local l = Instance.new("TextLabel")
 			l.BackgroundTransparency = 1
@@ -747,8 +675,6 @@ return function(lib)
 			return l
 		end
 
-		-- switch on the right edge of a row; onChange(on) runs on every change
-		-- gated = true -> the switch ignores clicks while "Enabled" (master) is off
 		local function makeSwitch(parent, onChange, gated)
 			local isOn = false
 
@@ -798,7 +724,6 @@ return function(lib)
 				apply(true)
 				onChange(isOn)
 			end
-			-- faded look while locked
 			function obj.SetLocked(value)
 				locked = value
 				local t = value and LOCKED_T or 0
@@ -808,7 +733,7 @@ return function(lib)
 			end
 			switch.MouseButton1Click:Connect(function()
 				if gated and not master then
-					return -- locked while "Enabled" is off
+					return
 				end
 				obj.Set(not isOn)
 			end)
@@ -841,7 +766,7 @@ return function(lib)
 			visCheck = isOn
 		end, true)
 
-		-- card 2 rows: one switch per feature
+		-- card 2 rows
 		local featSwitch = {}
 		for i, key in ipairs(FEATURES) do
 			local row = addRow((i - 1) * 45, ROW_H, featCard)
@@ -914,14 +839,13 @@ return function(lib)
 		distHit.Parent = distRow
 
 		bindDrag(distHit, function(m)
-			-- the hit area is a little wider than the track, so measure on the track itself
 			local tp, ts = distTrack.AbsolutePosition, distTrack.AbsoluteSize
 			local a = math.clamp((m.X - tp.X) / ts.X, 0, 1)
 			local value = DIST_MIN + a * (DIST_MAX - DIST_MIN)
 			setDistance(math.floor(value / DIST_STEP + 0.5) * DIST_STEP)
 		end)
 
-		-- ---------- locking: everything except "Enabled" fades and ignores input while master is off ----------
+		-- ---------- locking ----------
 		local lastLocked
 		local function refreshLocks()
 			local locked = not master
@@ -943,7 +867,7 @@ return function(lib)
 		refreshLocks()
 
 		-- ====================================================
-		-- settings window (connected under the main window, one panel per feature)
+		-- settings window
 		-- ====================================================
 		local SET_GAP = 6
 
@@ -978,7 +902,7 @@ return function(lib)
 			return l
 		end
 
-		local panels = {} -- [feature] = {frame = Frame, height = number}
+		local panels = {}
 		local function newPanel(key, height, title)
 			local f = Instance.new("Frame")
 			f.Name = key
@@ -997,7 +921,6 @@ return function(lib)
 			return f
 		end
 
-		-- row of exclusive buttons; onPick(name) runs on every change (click or .Set)
 		local function makeChoice(parent, x, y, names, initial, onPick)
 			local row = Instance.new("Frame")
 			row.BackgroundTransparency = 1
@@ -1063,8 +986,6 @@ return function(lib)
 			return api
 		end
 
-		-- color picker: saturation/value square + hue bar (+ alpha bar) + swatch + hex box
-		-- edits whichever slot is bound with .Bind(slot); onChange() runs after every edit
 		local function makePicker(parent, withAlpha, pickH, hexX, hexY, onChange)
 			local P = {slot = nil}
 			local hexFocused = false
@@ -1162,7 +1083,6 @@ return function(lib)
 			hueHit.ZIndex = 5
 			hueHit.Parent = hueFrame
 
-			-- alpha (transparency) bar
 			local alphaFill, alphaCursor, alphaHit
 			if withAlpha then
 				local alphaFrame = Instance.new("Frame")
@@ -1208,7 +1128,6 @@ return function(lib)
 				alphaHit.Parent = alphaFrame
 			end
 
-			-- color preview + hex
 			local swatch = Instance.new("Frame")
 			swatch.Position = UDim2.fromOffset(hexX, hexY)
 			swatch.Size = UDim2.fromOffset(26, 26)
@@ -1320,7 +1239,6 @@ return function(lib)
 
 		local function noop() end
 
-		-- small color dots on choice buttons (health Full/Mid/Low, team Ally/Enemy, chams Fill/Outline)
 		local dotList = {}
 		local function addDot(button, slotKey)
 			local dot = Instance.new("Frame")
@@ -1339,7 +1257,6 @@ return function(lib)
 			end
 		end
 
-		-- font row used by every text feature (label at y, buttons at y + 18)
 		local FONT_NAMES = {"UI", "System", "Plex", "Mono"}
 		local fontChoices = {}
 		local function addFontChoice(panel, key, y)
@@ -1349,193 +1266,201 @@ return function(lib)
 			end)
 		end
 
-		-- ---------- Box Esp panel ----------
+		-- option lists (kept OUTSIDE buildPanels because the API at the bottom uses them)
 		local STYLES = {"Full", "Corners", "3D"}
-		local boxPanel = newPanel("Box", 150, "BOX ESP")
-		local boxPicker = makePicker(boxPanel, true, 92, 226, 110, noop)
-		boxPicker.Bind(slots.box)
-		smallLabel(boxPanel, "STYLE", 226, 42)
-		local styleChoice = makeChoice(boxPanel, 226, 60, STYLES, style, function(name)
-			style = name
-		end)
-		smallLabel(boxPanel, "COLOR", 226, 94)
-
-		-- ---------- Box Fill panel ----------
-		local fillPanel = newPanel("BoxFill", 150, "BOX FILL")
-		local fillPicker = makePicker(fillPanel, true, 92, 226, 60, noop)
-		fillPicker.Bind(slots.fill)
-		smallLabel(fillPanel, "COLOR", 226, 42)
-
-		-- ---------- Chams panel ----------
 		local CHAM_STYLES = {"Fill", "Outline", "Both"}
-		local CHAM_STOPS = {Fill = "chamFill", Outline = "chamOutline"}
-		local chamsPanel = newPanel("Chams", 214, "CHAMS")
-		local chamsPicker = makePicker(chamsPanel, true, 150, 226, 186, refreshDots)
-		chamsPicker.Bind(slots.chamFill)
-		smallLabel(chamsPanel, "STYLE", 226, 42)
-		local chamStyleChoice = makeChoice(chamsPanel, 226, 60, CHAM_STYLES, chamStyle, function(name)
-			chamStyle = name
-		end)
-		smallLabel(chamsPanel, "THROUGH WALLS", 226, 90)
-		local chamWallsChoice = makeChoice(chamsPanel, 226, 108, {"On", "Off"}, chamWalls, function(name)
-			chamWalls = name
-		end)
-		smallLabel(chamsPanel, "COLORS", 226, 138)
-		local chamStopChoice = makeChoice(chamsPanel, 226, 156, {"Fill", "Outline"}, "Fill", function(name)
-			chamsPicker.Bind(slots[CHAM_STOPS[name]])
-		end)
-		for name, btn in pairs(chamStopChoice.buttons) do
-			addDot(btn, CHAM_STOPS[name])
-		end
-
-		-- ---------- Name Esp panel ----------
 		local NAME_SOURCES = {"Display", "Username", "Both"}
-		local namePanel = newPanel("Name", 190, "NAME ESP")
-		local namePicker = makePicker(namePanel, true, 132, 226, 154, noop)
-		namePicker.Bind(slots.name)
-		smallLabel(namePanel, "SOURCE", 226, 42)
-		local sourceChoice = makeChoice(namePanel, 226, 60, NAME_SOURCES, nameSource, function(name)
-			nameSource = name
-		end)
-		addFontChoice(namePanel, "Name", 90)
-		smallLabel(namePanel, "COLOR", 226, 138)
-
-		-- ---------- Health bar panel ----------
-		local HP_STOPS = {Full = "hpFull", Mid = "hpMid", Low = "hpLow"}
-		local healthPanel = newPanel("Health", 180, "HEALTH BAR")
-		local healthPicker = makePicker(healthPanel, false, 122, 226, 142, refreshDots)
-		healthPicker.Bind(slots.hpFull)
-		smallLabel(healthPanel, "MODE", 226, 42)
-		local hpModeChoice = makeChoice(healthPanel, 226, 60, {"Solid", "Gradient"}, hpMode, function(name)
-			hpMode = name
-		end)
-		smallLabel(healthPanel, "COLORS", 226, 90)
-		local hpStopChoice = makeChoice(healthPanel, 226, 108, {"Full", "Mid", "Low"}, "Full", function(name)
-			healthPicker.Bind(slots[HP_STOPS[name]])
-		end)
-		for name, btn in pairs(hpStopChoice.buttons) do
-			addDot(btn, HP_STOPS[name])
-		end
-
-		-- ---------- Armor bar panel ----------
-		local armorPanel = newPanel("Armor", 150, "ARMOR BAR")
-		local armorPicker = makePicker(armorPanel, true, 92, 226, 60, noop)
-		armorPicker.Bind(slots.armor)
-		smallLabel(armorPanel, "COLOR", 226, 42)
-
-		-- ---------- Health text panel ----------
 		local HP_FORMATS = {"Number", "Percent"}
-		local hpTextPanel = newPanel("HealthText", 190, "HEALTH TEXT")
-		local hpTextPicker = makePicker(hpTextPanel, true, 132, 226, 154, noop)
-		hpTextPicker.Bind(slots.hpText)
-		smallLabel(hpTextPanel, "FORMAT", 226, 42)
-		local hpFormatChoice = makeChoice(hpTextPanel, 226, 60, HP_FORMATS, hpFormat, function(name)
-			hpFormat = name
-		end)
-		addFontChoice(hpTextPanel, "HealthText", 90)
-		smallLabel(hpTextPanel, "COLOR", 226, 138)
-
-		-- ---------- Skeleton panel ----------
 		local THICKNESSES = {Thin = 1, Normal = 1.5, Thick = 2.5}
-		local skelPanel = newPanel("Skeleton", 150, "SKELETON ESP")
-		local skelPicker = makePicker(skelPanel, true, 92, 226, 60, noop)
-		skelPicker.Bind(slots.skel)
-		smallLabel(skelPanel, "COLOR", 226, 42)
-		smallLabel(skelPanel, "THICKNESS", 226, 94)
-		local thickChoice = makeChoice(skelPanel, 226, 110, {"Thin", "Normal", "Thick"}, "Thin", function(name)
-			skelThick = THICKNESSES[name]
-		end)
-
-		-- ---------- Head dot panel ----------
 		local HEAD_STYLES = {"Outline", "Filled"}
-		local headPanel = newPanel("HeadDot", 150, "HEAD DOT")
-		local headPicker = makePicker(headPanel, true, 92, 226, 110, noop)
-		headPicker.Bind(slots.head)
-		smallLabel(headPanel, "STYLE", 226, 42)
-		local headStyleChoice = makeChoice(headPanel, 226, 60, HEAD_STYLES, headStyle, function(name)
-			headStyle = name
-		end)
-		smallLabel(headPanel, "COLOR", 226, 94)
-
-		-- ---------- Look direction panel ----------
-		local lookPanel = newPanel("LookDir", 150, "LOOK DIRECTION")
-		local lookPicker = makePicker(lookPanel, true, 92, 226, 60, noop)
-		lookPicker.Bind(slots.look)
-		smallLabel(lookPanel, "COLOR", 226, 42)
-
-		-- ---------- Tracers panel ----------
 		local TRACER_ORIGINS = {"Bottom", "Center", "Top", "Mouse"}
-		local trcPanel = newPanel("Tracers", 150, "TRACERS")
-		local trcPicker = makePicker(trcPanel, true, 92, 226, 110, noop)
-		trcPicker.Bind(slots.trc)
-		smallLabel(trcPanel, "ORIGIN", 226, 42)
-		local tracerChoice = makeChoice(trcPanel, 226, 60, TRACER_ORIGINS, tracerFrom, function(name)
-			tracerFrom = name
-		end)
-		smallLabel(trcPanel, "COLOR", 226, 94)
-
-		-- ---------- Off-screen arrows panel ----------
 		local ARROW_SIZES = {"Small", "Medium", "Large"}
 		local ARROW_RADII = {"Near", "Mid", "Far"}
-		local arrowPanel = newPanel("Arrows", 180, "OFF-SCREEN ARROWS")
-		local arrowPicker = makePicker(arrowPanel, true, 122, 226, 142, noop)
-		arrowPicker.Bind(slots.arrow)
-		smallLabel(arrowPanel, "SIZE", 226, 42)
-		local arrowSizeChoice = makeChoice(arrowPanel, 226, 60, ARROW_SIZES, arrowSize, function(name)
-			arrowSize = name
-		end)
-		smallLabel(arrowPanel, "DISTANCE FROM CENTER", 226, 90)
-		local arrowRadiusChoice = makeChoice(arrowPanel, 226, 108, ARROW_RADII, arrowRadius, function(name)
-			arrowRadius = name
-		end)
 
-		-- ---------- Distance text panel ----------
-		local distPanel = newPanel("Distance", 150, "DISTANCE TEXT")
-		local distPicker = makePicker(distPanel, true, 92, 226, 110, noop)
-		distPicker.Bind(slots.dist)
-		addFontChoice(distPanel, "Distance", 42)
-		smallLabel(distPanel, "COLOR", 226, 94)
+		-- all settings panels live in this function so their locals don't count
+		-- toward the 200-local limit of the main function
+		local function buildPanels()
+			-- ---------- Box Esp panel ----------
+			local boxPanel = newPanel("Box", 150, "BOX ESP")
+			local boxPicker = makePicker(boxPanel, true, 92, 226, 110, noop)
+			boxPicker.Bind(slots.box)
+			smallLabel(boxPanel, "STYLE", 226, 42)
+			local styleChoice = makeChoice(boxPanel, 226, 60, STYLES, style, function(name)
+				style = name
+			end)
+			smallLabel(boxPanel, "COLOR", 226, 94)
 
-		-- ---------- Weapon text panel ----------
-		local weaponPanel = newPanel("Weapon", 150, "WEAPON TEXT")
-		local weaponPicker = makePicker(weaponPanel, true, 92, 226, 110, noop)
-		weaponPicker.Bind(slots.weapon)
-		addFontChoice(weaponPanel, "Weapon", 42)
-		smallLabel(weaponPanel, "COLOR", 226, 94)
+			-- ---------- Box Fill panel ----------
+			local fillPanel = newPanel("BoxFill", 150, "BOX FILL")
+			local fillPicker = makePicker(fillPanel, true, 92, 226, 60, noop)
+			fillPicker.Bind(slots.fill)
+			smallLabel(fillPanel, "COLOR", 226, 42)
 
-		-- ---------- Team colors panel ----------
-		local TEAM_STOPS = {Ally = "ally", Enemy = "enemy"}
-		local teamPanel = newPanel("TeamColors", 180, "TEAM COLORS")
-		local teamPicker = makePicker(teamPanel, false, 122, 226, 142, refreshDots)
-		teamPicker.Bind(slots.ally)
-		smallLabel(teamPanel, "SOURCE", 226, 42)
-		local teamSourceChoice = makeChoice(teamPanel, 226, 60, {"Custom", "Roblox"}, teamSource, function(name)
-			teamSource = name
-		end)
-		smallLabel(teamPanel, "COLORS", 226, 90)
-		local teamStopChoice = makeChoice(teamPanel, 226, 108, {"Ally", "Enemy"}, "Ally", function(name)
-			teamPicker.Bind(slots[TEAM_STOPS[name]])
-		end)
-		for name, btn in pairs(teamStopChoice.buttons) do
-			addDot(btn, TEAM_STOPS[name])
+			-- ---------- Chams panel ----------
+			local CHAM_STOPS = {Fill = "chamFill", Outline = "chamOutline"}
+			local chamsPanel = newPanel("Chams", 214, "CHAMS")
+			local chamsPicker = makePicker(chamsPanel, true, 150, 226, 186, refreshDots)
+			chamsPicker.Bind(slots.chamFill)
+			smallLabel(chamsPanel, "STYLE", 226, 42)
+			local chamStyleChoice = makeChoice(chamsPanel, 226, 60, CHAM_STYLES, chamStyle, function(name)
+				chamStyle = name
+			end)
+			smallLabel(chamsPanel, "THROUGH WALLS", 226, 90)
+			local chamWallsChoice = makeChoice(chamsPanel, 226, 108, {"On", "Off"}, chamWalls, function(name)
+				chamWalls = name
+			end)
+			smallLabel(chamsPanel, "COLORS", 226, 138)
+			local chamStopChoice = makeChoice(chamsPanel, 226, 156, {"Fill", "Outline"}, "Fill", function(name)
+				chamsPicker.Bind(slots[CHAM_STOPS[name]])
+			end)
+			for name, btn in pairs(chamStopChoice.buttons) do
+				addDot(btn, CHAM_STOPS[name])
+			end
+
+			-- ---------- Name Esp panel ----------
+			local namePanel = newPanel("Name", 190, "NAME ESP")
+			local namePicker = makePicker(namePanel, true, 132, 226, 154, noop)
+			namePicker.Bind(slots.name)
+			smallLabel(namePanel, "SOURCE", 226, 42)
+			local sourceChoice = makeChoice(namePanel, 226, 60, NAME_SOURCES, nameSource, function(name)
+				nameSource = name
+			end)
+			addFontChoice(namePanel, "Name", 90)
+			smallLabel(namePanel, "COLOR", 226, 138)
+
+			-- ---------- Health bar panel ----------
+			local HP_STOPS = {Full = "hpFull", Mid = "hpMid", Low = "hpLow"}
+			local healthPanel = newPanel("Health", 180, "HEALTH BAR")
+			local healthPicker = makePicker(healthPanel, false, 122, 226, 142, refreshDots)
+			healthPicker.Bind(slots.hpFull)
+			smallLabel(healthPanel, "MODE", 226, 42)
+			local hpModeChoice = makeChoice(healthPanel, 226, 60, {"Solid", "Gradient"}, hpMode, function(name)
+				hpMode = name
+			end)
+			smallLabel(healthPanel, "COLORS", 226, 90)
+			local hpStopChoice = makeChoice(healthPanel, 226, 108, {"Full", "Mid", "Low"}, "Full", function(name)
+				healthPicker.Bind(slots[HP_STOPS[name]])
+			end)
+			for name, btn in pairs(hpStopChoice.buttons) do
+				addDot(btn, HP_STOPS[name])
+			end
+
+			-- ---------- Armor bar panel ----------
+			local armorPanel = newPanel("Armor", 150, "ARMOR BAR")
+			local armorPicker = makePicker(armorPanel, true, 92, 226, 60, noop)
+			armorPicker.Bind(slots.armor)
+			smallLabel(armorPanel, "COLOR", 226, 42)
+
+			-- ---------- Health text panel ----------
+			local hpTextPanel = newPanel("HealthText", 190, "HEALTH TEXT")
+			local hpTextPicker = makePicker(hpTextPanel, true, 132, 226, 154, noop)
+			hpTextPicker.Bind(slots.hpText)
+			smallLabel(hpTextPanel, "FORMAT", 226, 42)
+			local hpFormatChoice = makeChoice(hpTextPanel, 226, 60, HP_FORMATS, hpFormat, function(name)
+				hpFormat = name
+			end)
+			addFontChoice(hpTextPanel, "HealthText", 90)
+			smallLabel(hpTextPanel, "COLOR", 226, 138)
+
+			-- ---------- Skeleton panel ----------
+			local skelPanel = newPanel("Skeleton", 150, "SKELETON ESP")
+			local skelPicker = makePicker(skelPanel, true, 92, 226, 60, noop)
+			skelPicker.Bind(slots.skel)
+			smallLabel(skelPanel, "COLOR", 226, 42)
+			smallLabel(skelPanel, "THICKNESS", 226, 94)
+			local thickChoice = makeChoice(skelPanel, 226, 110, {"Thin", "Normal", "Thick"}, "Thin", function(name)
+				skelThick = THICKNESSES[name]
+			end)
+
+			-- ---------- Head dot panel ----------
+			local headPanel = newPanel("HeadDot", 150, "HEAD DOT")
+			local headPicker = makePicker(headPanel, true, 92, 226, 110, noop)
+			headPicker.Bind(slots.head)
+			smallLabel(headPanel, "STYLE", 226, 42)
+			local headStyleChoice = makeChoice(headPanel, 226, 60, HEAD_STYLES, headStyle, function(name)
+				headStyle = name
+			end)
+			smallLabel(headPanel, "COLOR", 226, 94)
+
+			-- ---------- Look direction panel ----------
+			local lookPanel = newPanel("LookDir", 150, "LOOK DIRECTION")
+			local lookPicker = makePicker(lookPanel, true, 92, 226, 60, noop)
+			lookPicker.Bind(slots.look)
+			smallLabel(lookPanel, "COLOR", 226, 42)
+
+			-- ---------- Tracers panel ----------
+			local trcPanel = newPanel("Tracers", 150, "TRACERS")
+			local trcPicker = makePicker(trcPanel, true, 92, 226, 110, noop)
+			trcPicker.Bind(slots.trc)
+			smallLabel(trcPanel, "ORIGIN", 226, 42)
+			local tracerChoice = makeChoice(trcPanel, 226, 60, TRACER_ORIGINS, tracerFrom, function(name)
+				tracerFrom = name
+			end)
+			smallLabel(trcPanel, "COLOR", 226, 94)
+
+			-- ---------- Off-screen arrows panel ----------
+			local arrowPanel = newPanel("Arrows", 180, "OFF-SCREEN ARROWS")
+			local arrowPicker = makePicker(arrowPanel, true, 122, 226, 142, noop)
+			arrowPicker.Bind(slots.arrow)
+			smallLabel(arrowPanel, "SIZE", 226, 42)
+			local arrowSizeChoice = makeChoice(arrowPanel, 226, 60, ARROW_SIZES, arrowSize, function(name)
+				arrowSize = name
+			end)
+			smallLabel(arrowPanel, "DISTANCE FROM CENTER", 226, 90)
+			local arrowRadiusChoice = makeChoice(arrowPanel, 226, 108, ARROW_RADII, arrowRadius, function(name)
+				arrowRadius = name
+			end)
+
+			-- ---------- Distance text panel ----------
+			local distPanel = newPanel("Distance", 150, "DISTANCE TEXT")
+			local distPicker = makePicker(distPanel, true, 92, 226, 110, noop)
+			distPicker.Bind(slots.dist)
+			addFontChoice(distPanel, "Distance", 42)
+			smallLabel(distPanel, "COLOR", 226, 94)
+
+			-- ---------- Weapon text panel ----------
+			local weaponPanel = newPanel("Weapon", 150, "WEAPON TEXT")
+			local weaponPicker = makePicker(weaponPanel, true, 92, 226, 110, noop)
+			weaponPicker.Bind(slots.weapon)
+			addFontChoice(weaponPanel, "Weapon", 42)
+			smallLabel(weaponPanel, "COLOR", 226, 94)
+
+			-- ---------- Team colors panel ----------
+			local TEAM_STOPS = {Ally = "ally", Enemy = "enemy"}
+			local teamPanel = newPanel("TeamColors", 180, "TEAM COLORS")
+			local teamPicker = makePicker(teamPanel, false, 122, 226, 142, refreshDots)
+			teamPicker.Bind(slots.ally)
+			smallLabel(teamPanel, "SOURCE", 226, 42)
+			local teamSourceChoice = makeChoice(teamPanel, 226, 60, {"Custom", "Roblox"}, teamSource, function(name)
+				teamSource = name
+			end)
+			smallLabel(teamPanel, "COLORS", 226, 90)
+			local teamStopChoice = makeChoice(teamPanel, 226, 108, {"Ally", "Enemy"}, "Ally", function(name)
+				teamPicker.Bind(slots[TEAM_STOPS[name]])
+			end)
+			for name, btn in pairs(teamStopChoice.buttons) do
+				addDot(btn, TEAM_STOPS[name])
+			end
+
+			return {
+				pickers = {boxPicker, fillPicker, chamsPicker, namePicker, healthPicker, armorPicker,
+					hpTextPicker, skelPicker, headPicker, lookPicker, trcPicker, arrowPicker,
+					distPicker, weaponPicker, teamPicker},
+				choices = {
+					style = styleChoice, chamStyle = chamStyleChoice, chamWalls = chamWallsChoice,
+					source = sourceChoice, hpMode = hpModeChoice, hpFormat = hpFormatChoice,
+					thick = thickChoice, head = headStyleChoice, tracer = tracerChoice,
+					arrowSize = arrowSizeChoice, arrowRadius = arrowRadiusChoice,
+					teamSource = teamSourceChoice,
+				},
+			}
 		end
+		local ui = buildPanels()
 
 		local function refreshAllPickers()
-			boxPicker.Refresh()
-			fillPicker.Refresh()
-			chamsPicker.Refresh()
-			namePicker.Refresh()
-			healthPicker.Refresh()
-			armorPicker.Refresh()
-			hpTextPicker.Refresh()
-			skelPicker.Refresh()
-			headPicker.Refresh()
-			lookPicker.Refresh()
-			trcPicker.Refresh()
-			arrowPicker.Refresh()
-			distPicker.Refresh()
-			weaponPicker.Refresh()
-			teamPicker.Refresh()
+			for _, p in ipairs(ui.pickers) do
+				p.Refresh()
+			end
 			refreshDots()
 		end
 
@@ -1573,7 +1498,6 @@ return function(lib)
 				end
 			end
 
-			-- sit under the window, or flip above it if the screen has no room
 			if settings.Visible then
 				local p, sz = win.frame.AbsolutePosition, win.frame.AbsoluteSize
 				local below = p.Y + sz.Y + SET_GAP + curH <= win.gui.AbsoluteSize.Y
@@ -1584,7 +1508,7 @@ return function(lib)
 		end
 
 		-- ====================================================
-		-- text / health / armor helpers (shared by preview and real ESP)
+		-- text / health / armor helpers
 		-- ====================================================
 		local function nameText(player)
 			if nameSource == "Username" then
@@ -1599,7 +1523,6 @@ return function(lib)
 			return "[" .. math.floor(dist + 0.5) .. "]"
 		end
 
-		-- distance moves next to the name when the weapon text is on too (and the name is on)
 		local function distanceOnName()
 			return feat.Distance and feat.Weapon and feat.Name
 		end
@@ -1619,7 +1542,6 @@ return function(lib)
 			return math.clamp(hum.Health / mh, 0, 1)
 		end
 
-		-- t: 0 = low, 0.5 = mid, 1 = full
 		local function healthColor(t)
 			local lo, mid, hi = colorOf(slots.hpLow), colorOf(slots.hpMid), colorOf(slots.hpFull)
 			if t < 0.5 then
@@ -1628,15 +1550,13 @@ return function(lib)
 			return mid:Lerp(hi, (t - 0.5) * 2)
 		end
 
-		-- rectangles of the health bar, filled from `bnd` (call computeBounds first)
 		local hpRects = {}
 		for i = 1, HP_SEGS do
 			hpRects[i] = {0, 0, 0, 0, Color3.new(1, 1, 1)}
 		end
 		local hpBg = {0, 0, 0, 0}
-		local hpInfo = {x = 0, y = 0} -- left edge of the bar and height of the current health (for the text)
+		local hpInfo = {x = 0, y = 0}
 
-		-- returns how many fill rectangles to draw; also fills hpBg and hpInfo
 		local function computeHealth(frac)
 			local top = math.floor(bnd.minY - PAD)
 			local bottom = math.floor(bnd.maxY + PAD)
@@ -1667,7 +1587,6 @@ return function(lib)
 			return n
 		end
 
-		-- armor bar: same height as the box, on its right side (call computeBounds first)
 		local armBg = {0, 0, 0, 0}
 		local armRect = {0, 0, 0, 0}
 		local function computeArmor(frac)
@@ -1679,7 +1598,6 @@ return function(lib)
 			armRect[1], armRect[2], armRect[3], armRect[4] = x, bottom - H * frac, HP_W, H * frac
 		end
 
-		-- where the tracers start, in screen coordinates
 		local function tracerOrigin(w, h, mouse)
 			if tracerFrom == "Center" then
 				return w / 2, h / 2
@@ -1692,11 +1610,11 @@ return function(lib)
 		end
 
 		-- ====================================================
-		-- preview on the 3D avatar render (GUI objects inside the viewport)
+		-- preview on the 3D avatar render
 		-- ====================================================
 		local previewViewport
 		local prevBox, prevSkel, prevHp, prevTrc, prevFill, prevArmor, prevLook = {}, {}, {}, {}, {}, {}, {}
-		local prevTexts = {} -- ["name" / "hpText" / "dist" / "weapon"] = TextLabel
+		local prevTexts = {}
 		local prevDot, prevDotStroke
 
 		local function findViewport()
@@ -1757,7 +1675,6 @@ return function(lib)
 			end
 		end
 
-		-- ax / ay: which point of the label sits on (x, y) - 0 = left/top, 0.5 = center, 1 = right/bottom
 		local function showPreviewText(key, str, x, y, ax, ay, c, a, fontName)
 			local l = prevTexts[key]
 			if not l then
@@ -1837,7 +1754,6 @@ return function(lib)
 				hidePool(prevHp)
 				return
 			end
-			-- pool[1] = background, pool[2..] = fill rectangles
 			local bg = getFrame(prevHp, 1, "EspHpBg")
 			bg.AnchorPoint = Vector2.new(0, 0)
 			bg.Rotation = 0
@@ -1908,7 +1824,6 @@ return function(lib)
 			local hasB = needsBounds() and computeBounds(model, project)
 			local cx = (bnd.minX + bnd.maxX) / 2
 
-			-- box fill
 			if feat.BoxFill and hasB then
 				local f = getFrame(prevFill, 1, "EspFill")
 				f.ZIndex = 19
@@ -1923,19 +1838,15 @@ return function(lib)
 				hidePool(prevFill)
 			end
 
-			-- box
 			local n = feat.Box and computeBox(model, project, style, hasB) or 0
 			drawLinePool(prevBox, n, segs, colorFor(slots.box, nil), slots.box.a, THICKNESS)
 
-			-- skeleton
 			n = feat.Skeleton and computeSkeleton(model, project) or 0
 			drawLinePool(prevSkel, n, bones, colorFor(slots.skel, nil), slots.skel.a, skelThick)
 
-			-- look direction
 			n = feat.LookDir and computeLook(model, project) or 0
 			drawLinePool(prevLook, n, lookSeg, colorFor(slots.look, nil), slots.look.a, 1.5)
 
-			-- head dot
 			if feat.HeadDot then
 				local hx, hy, hr = computeHead(model, project)
 				if hx then
@@ -1947,7 +1858,6 @@ return function(lib)
 				hideDotPreview()
 			end
 
-			-- tracers (from the bottom / middle / top of the preview)
 			n = 0
 			if feat.Tracers then
 				local ox, oy = tracerOrigin(vpSize.X, vpSize.Y, nil)
@@ -1955,7 +1865,6 @@ return function(lib)
 			end
 			drawLinePool(prevTrc, n, tracerSeg, colorFor(slots.trc, nil), slots.trc.a, 1)
 
-			-- health bar + health text (the preview health slowly moves up and down so the colors are visible)
 			if (feat.Health or feat.HealthText) and hasB then
 				local frac = 0.575 + 0.425 * math.sin(os.clock() * 0.9)
 				drawHealthPreview(computeHealth(frac), feat.Health)
@@ -1970,7 +1879,6 @@ return function(lib)
 				hidePreviewText("hpText")
 			end
 
-			-- armor bar (moves too, a little out of step with the health)
 			if feat.Armor and hasB then
 				computeArmor(0.6 + 0.4 * math.sin(os.clock() * 0.7 + 1.5))
 				drawArmorPreview(true)
@@ -1978,7 +1886,6 @@ return function(lib)
 				drawArmorPreview(false)
 			end
 
-			-- name (+ distance when it was moved here)
 			if feat.Name and hasB then
 				local str = nameText(LocalPlayer)
 				if distanceOnName() then
@@ -1989,7 +1896,6 @@ return function(lib)
 				hidePreviewText("name")
 			end
 
-			-- lines under the player: weapon first, then the distance (if it did not move to the name)
 			local by = bnd.maxY + PAD + 2
 			if feat.Weapon and hasB then
 				showPreviewText("weapon", "Weapon", cx, by, 0.5, 0, colorFor(slots.weapon, nil), slots.weapon.a, fonts.Weapon)
@@ -2007,9 +1913,8 @@ return function(lib)
 		-- ====================================================
 		-- real ESP (only while the menu is hidden)
 		-- ====================================================
-		local records = {} -- [player] = {...drawing objects...}
+		local records = {}
 
-		-- chams live in one folder as Highlight instances (Roblox draws at most ~31 highlights at once)
 		local chamFolder = Instance.new("Folder")
 		chamFolder.Name = "EspChams"
 		do
@@ -2127,7 +2032,6 @@ return function(lib)
 			end
 		end
 
-		-- keepArrow: the off-screen arrow ignores the visible check, so it stays when everything else hides
 		local function hideRecord(rec, keepArrow)
 			for i = 1, rec.boxShown do rec.box[i].Visible = false end
 			rec.boxShown = 0
@@ -2170,8 +2074,6 @@ return function(lib)
 			end
 		end
 
-		-- draws `count` segments from `src` on the line list, hides the rest, returns count
-		-- (the alpha is multiplied by the distance fade of the player being drawn)
 		local function setLines(list, prevShown, count, src, c, a, thick)
 			while #list < count do
 				table.insert(list, newLine())
@@ -2192,7 +2094,6 @@ return function(lib)
 			return count
 		end
 
-		-- draws `count` health rectangles (hpRects), hides the rest, returns count
 		local function setSquares(list, prevShown, count)
 			while #list < count do
 				table.insert(list, newSquare())
@@ -2211,7 +2112,6 @@ return function(lib)
 			return count
 		end
 
-		-- creates / updates a Drawing text (does not position or show it)
 		local function getText(rec, key, str, c, a, fontName)
 			local t = rec.text[key]
 			if not t then
@@ -2247,7 +2147,6 @@ return function(lib)
 			return #str * 6.5, 13
 		end
 
-		-- cham colors: with Team Colors on, the outline is a lighter shade of the fill
 		local function chamColors(player)
 			local fill = colorFor(slots.chamFill, player)
 			local outline
@@ -2313,13 +2212,12 @@ return function(lib)
 				rec.arrowOn = false
 			end
 
-			-- everything else needs the player to be visible when the check is on
 			if visCheck and not isVisible(char, camera) then
 				hideRecord(rec, true)
 				return
 			end
 
-			-- chams (Highlight)
+			-- chams
 			if feat.Chams then
 				local h = rec.cham
 				if not h or not h.Parent then
@@ -2345,7 +2243,7 @@ return function(lib)
 			local hasB = needsBounds() and computeBounds(char, project)
 			local cx = (bnd.minX + bnd.maxX) / 2
 
-			-- box fill (drawn under everything else)
+			-- box fill
 			if feat.BoxFill and hasB then
 				local f = rec.fill
 				if not f then
@@ -2432,7 +2330,6 @@ return function(lib)
 					local str = healthText(hum, frac)
 					local t = getText(rec, "hpText", str, colorOf(slots.hpText), slots.hpText.a, fonts.HealthText)
 					local tw, th = textSize(t, str)
-					-- sits left of the bar, level with the current health, kept inside the bar's height
 					local ty = math.clamp(hpInfo.y - th / 2, hpBg[2], math.max(hpBg[2], hpBg[2] + hpBg[4] - th))
 					showText(rec, "hpText", t, hpInfo.x - 3 - tw / 2, ty)
 				else
@@ -2448,7 +2345,7 @@ return function(lib)
 				hideText(rec, "hpText")
 			end
 
-			-- armor bar (only when the character has an armor value above 0)
+			-- armor bar
 			local aFrac = (feat.Armor and hasB) and armorFrac(char) or nil
 			if aFrac and aFrac > 0 then
 				computeArmor(aFrac)
@@ -2473,7 +2370,7 @@ return function(lib)
 				rec.armorOn = false
 			end
 
-			-- name (+ distance when it was moved here)
+			-- name
 			if feat.Name and hasB then
 				local str = nameText(player)
 				if distanceOnName() then
@@ -2485,7 +2382,7 @@ return function(lib)
 				hideText(rec, "name")
 			end
 
-			-- lines under the player: weapon first, then the distance (if it did not move to the name)
+			-- weapon + distance under the player
 			local by = bnd.maxY + PAD + 2
 			local wStr = (feat.Weapon and hasB) and weaponName(char) or nil
 			if wStr then
@@ -2505,7 +2402,6 @@ return function(lib)
 
 		local wasActive = false
 		local function updateEsp()
-			-- master off, no feature on, or menu open -> nothing on the real players
 			local active = hasDrawing and master and anyOn() and win.gui.Parent ~= nil and not win.gui.Enabled
 			if not active then
 				if wasActive then
@@ -2594,9 +2490,7 @@ return function(lib)
 			end,
 
 			-- feature switches
-			SetEnabled = function(value) -- Box Esp (kept for backwards compatibility)
-				featSwitch.Box.Set(value)
-			end,
+			SetEnabled = function(value) featSwitch.Box.Set(value) end,
 			SetBoxEsp = function(value) featSwitch.Box.Set(value) end,
 			SetBoxFill = function(value) featSwitch.BoxFill.Set(value) end,
 			SetChams = function(value) featSwitch.Chams.Set(value) end,
@@ -2616,11 +2510,11 @@ return function(lib)
 			-- box
 			SetStyle = function(name)
 				if indexOf(STYLES, name) then
-					styleChoice.Set(name)
+					ui.choices.style.Set(name)
 				end
 			end,
-			SetColor = function(c) setSlot(slots.box, c) end, -- box color
-			SetAlpha = function(a) -- box alpha
+			SetColor = function(c) setSlot(slots.box, c) end,
+			SetAlpha = function(a)
 				slots.box.a = math.clamp(a, 0, 1)
 				refreshAllPickers()
 			end,
@@ -2633,13 +2527,13 @@ return function(lib)
 			end,
 
 			-- chams
-			SetChamsStyle = function(name) -- "Fill" / "Outline" / "Both"
+			SetChamsStyle = function(name)
 				if indexOf(CHAM_STYLES, name) then
-					chamStyleChoice.Set(name)
+					ui.choices.chamStyle.Set(name)
 				end
 			end,
 			SetChamsThroughWalls = function(value)
-				chamWallsChoice.Set(value and "On" or "Off")
+				ui.choices.chamWalls.Set(value and "On" or "Off")
 			end,
 			SetChamsColors = function(fill, outline, fillAlpha, outlineAlpha)
 				setSlot(slots.chamFill, fill)
@@ -2656,17 +2550,17 @@ return function(lib)
 			end,
 
 			-- name
-			SetNameSource = function(name) -- "Display" / "Username" / "Both"
+			SetNameSource = function(name)
 				if indexOf(NAME_SOURCES, name) then
-					sourceChoice.Set(name)
+					ui.choices.source.Set(name)
 				end
 			end,
 			SetNameColor = function(c) setSlot(slots.name, c) end,
 
 			-- health / armor
-			SetHealthMode = function(name) -- "Solid" / "Gradient"
+			SetHealthMode = function(name)
 				if name == "Solid" or name == "Gradient" then
-					hpModeChoice.Set(name)
+					ui.choices.hpMode.Set(name)
 				end
 			end,
 			SetHealthColors = function(full, mid, low)
@@ -2675,45 +2569,45 @@ return function(lib)
 				setSlot(slots.hpLow, low)
 			end,
 			SetArmorColor = function(c) setSlot(slots.armor, c) end,
-			SetHealthTextFormat = function(name) -- "Number" / "Percent"
+			SetHealthTextFormat = function(name)
 				if indexOf(HP_FORMATS, name) then
-					hpFormatChoice.Set(name)
+					ui.choices.hpFormat.Set(name)
 				end
 			end,
 			SetHealthTextColor = function(c) setSlot(slots.hpText, c) end,
 
 			-- skeleton
 			SetSkeletonColor = function(c) setSlot(slots.skel, c) end,
-			SetSkeletonThickness = function(name) -- "Thin" / "Normal" / "Thick"
+			SetSkeletonThickness = function(name)
 				if THICKNESSES[name] then
-					thickChoice.Set(name)
+					ui.choices.thick.Set(name)
 				end
 			end,
 
 			-- head dot / look direction
-			SetHeadDotStyle = function(name) -- "Outline" / "Filled"
+			SetHeadDotStyle = function(name)
 				if indexOf(HEAD_STYLES, name) then
-					headStyleChoice.Set(name)
+					ui.choices.head.Set(name)
 				end
 			end,
 			SetHeadDotColor = function(c) setSlot(slots.head, c) end,
 			SetLookColor = function(c) setSlot(slots.look, c) end,
 
 			-- tracers / arrows
-			SetTracerOrigin = function(name) -- "Bottom" / "Center" / "Top" / "Mouse"
+			SetTracerOrigin = function(name)
 				if indexOf(TRACER_ORIGINS, name) then
-					tracerChoice.Set(name)
+					ui.choices.tracer.Set(name)
 				end
 			end,
 			SetTracerColor = function(c) setSlot(slots.trc, c) end,
-			SetArrowSize = function(name) -- "Small" / "Medium" / "Large"
+			SetArrowSize = function(name)
 				if indexOf(ARROW_SIZES, name) then
-					arrowSizeChoice.Set(name)
+					ui.choices.arrowSize.Set(name)
 				end
 			end,
-			SetArrowDistance = function(name) -- "Near" / "Mid" / "Far"
+			SetArrowDistance = function(name)
 				if indexOf(ARROW_RADII, name) then
-					arrowRadiusChoice.Set(name)
+					ui.choices.arrowRadius.Set(name)
 				end
 			end,
 			SetArrowColor = function(c) setSlot(slots.arrow, c) end,
@@ -2722,7 +2616,7 @@ return function(lib)
 			SetDistanceColor = function(c) setSlot(slots.dist, c) end,
 			SetWeaponColor = function(c) setSlot(slots.weapon, c) end,
 
-			-- fonts: feature = "Name" / "HealthText" / "Distance" / "Weapon", name = "UI" / "System" / "Plex" / "Mono"
+			-- fonts
 			SetFont = function(feature, name)
 				if fontChoices[feature] and indexOf(FONT_NAMES, name) then
 					fontChoices[feature].Set(name)
@@ -2730,9 +2624,9 @@ return function(lib)
 			end,
 
 			-- team colors
-			SetTeamColorSource = function(name) -- "Custom" / "Roblox"
+			SetTeamColorSource = function(name)
 				if name == "Custom" or name == "Roblox" then
-					teamSourceChoice.Set(name)
+					ui.choices.teamSource.Set(name)
 				end
 			end,
 			SetTeamColorsCustom = function(ally, enemy)
