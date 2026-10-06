@@ -1,6 +1,11 @@
 -- toolstab.lua
 -- loadstring(game:HttpGet(TOOLS_TAB_URL))()(lib)
 -- Returns: builder(opts) → nil
+--
+-- Tools page:
+--   left   grid of every tool you own (backpack + equipped) with icons
+--   right  3D preview of the selected tool + Equip / Unequip button
+--   side   "Gun mods" panel when the selected tool is one of the supported guns
 
 return function(lib)
 	local Players          = lib.Players
@@ -23,6 +28,11 @@ return function(lib)
 		local TEXT_DIM  = Color3.fromRGB(130, 130, 136)
 		local TEXT_SOFT = Color3.fromRGB(190, 190, 196)
 		local CARD_BG   = Color3.fromRGB(22, 22, 25)
+		local TILE_BG   = Color3.fromRGB(28, 28, 32)
+		local TILE_BG_SEL = Color3.fromRGB(42, 42, 48)
+		local STROKE    = Color3.fromRGB(42, 42, 47)
+		local STROKE_HOVER = Color3.fromRGB(75, 75, 82)
+		local STROKE_SEL   = Color3.fromRGB(120, 120, 130)
 		local TRACK     = Color3.fromRGB(44, 44, 50)
 		local WHITE     = Color3.fromRGB(225, 225, 232)
 
@@ -58,33 +68,141 @@ return function(lib)
 		end
 
 		-- ============================================================
-		-- empty-state label (shown when no tool is equipped)
+		-- tool model helpers (used by the big preview and the tile icons)
 		-- ============================================================
+		-- bounding box of the *visible* parts only (ignores invisible hitboxes
+		-- and giant effect parts that would stretch the box and push the camera away)
+		local function getBounds(model)
+			local function scan(onlyVisible)
+				local minP = Vector3.new(math.huge, math.huge, math.huge)
+				local maxP = Vector3.new(-math.huge, -math.huge, -math.huge)
+				local found = false
+				for _, part in ipairs(model:GetDescendants()) do
+					if part:IsA("BasePart") then
+						local big = math.max(part.Size.X, part.Size.Y, part.Size.Z)
+						if not onlyVisible or (part.Transparency < 0.95 and big < 30) then
+							local s = part.Size / 2
+							for _, sx in ipairs({-1, 1}) do
+								for _, sy in ipairs({-1, 1}) do
+									for _, sz in ipairs({-1, 1}) do
+										local w = part.CFrame:PointToWorldSpace(Vector3.new(s.X * sx, s.Y * sy, s.Z * sz))
+										minP = Vector3.new(math.min(minP.X, w.X), math.min(minP.Y, w.Y), math.min(minP.Z, w.Z))
+										maxP = Vector3.new(math.max(maxP.X, w.X), math.max(maxP.Y, w.Y), math.max(maxP.Z, w.Z))
+									end
+								end
+							end
+							found = true
+						end
+					end
+				end
+				return found, minP, maxP
+			end
+
+			local found, minP, maxP = scan(true)
+			if not found then
+				found, minP, maxP = scan(false) -- nothing visible, fall back to every part
+			end
+			if not found then
+				return Vector3.new(-1, -1, -1), Vector3.new(1, 1, 1)
+			end
+			return minP, maxP
+		end
+
+		-- copy of a tool (no scripts), anchored and centred on its visible parts.
+		-- returns the model and the size of its bounds, or nil if there's nothing to show
+		local function cloneToolModel(tool)
+			local clone = Instance.new("Model")
+			for _, child in ipairs(tool:GetChildren()) do
+				if not child:IsA("Script") and not child:IsA("LocalScript") and not child:IsA("ModuleScript") then
+					child:Clone().Parent = clone
+				end
+			end
+			if not next(clone:GetChildren()) then
+				clone:Destroy()
+				return nil
+			end
+
+			for _, part in ipairs(clone:GetDescendants()) do
+				if part:IsA("BasePart") then
+					part.Anchored    = true
+					part.CastShadow  = false
+					part.Velocity    = Vector3.zero
+					part.RotVelocity = Vector3.zero
+				end
+			end
+
+			local minP, maxP = getBounds(clone)
+			local offset = CFrame.new(-((minP + maxP) / 2))
+			for _, part in ipairs(clone:GetDescendants()) do
+				if part:IsA("BasePart") then
+					part.CFrame = offset * part.CFrame
+				end
+			end
+			return clone, math.clamp((maxP - minP).Magnitude, 0.5, 20)
+		end
+
+		-- ============================================================
+		-- layout: tool grid (left) + preview card (right)
+		-- ============================================================
+		local listCard = Instance.new("Frame")
+		listCard.Name = "ToolList"
+		listCard.Position = UDim2.fromOffset(20, 62)
+		listCard.Size = UDim2.new(0, 232, 1, -78)
+		listCard.BackgroundColor3 = CARD_BG
+		listCard.BorderSizePixel = 0
+		listCard.Parent = page
+		addCorner(listCard)
+		addStroke(listCard, STROKE)
+
+		local listScroll = Instance.new("ScrollingFrame")
+		listScroll.BackgroundTransparency = 1
+		listScroll.BorderSizePixel = 0
+		listScroll.Position = UDim2.fromOffset(6, 6)
+		listScroll.Size = UDim2.new(1, -12, 1, -12)
+		listScroll.CanvasSize = UDim2.new()
+		listScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+		listScroll.ScrollingDirection = Enum.ScrollingDirection.Y
+		listScroll.ScrollBarThickness = 3
+		listScroll.ScrollBarImageColor3 = Color3.fromRGB(90, 90, 98)
+		listScroll.Parent = listCard
+
+		local grid = Instance.new("UIGridLayout")
+		grid.CellSize = UDim2.fromOffset(66, 76)
+		grid.CellPadding = UDim2.fromOffset(6, 6)
+		grid.SortOrder = Enum.SortOrder.Name
+		grid.Parent = listScroll
+
+		local listEmpty = Instance.new("TextLabel")
+		listEmpty.BackgroundTransparency = 1
+		listEmpty.AnchorPoint = Vector2.new(0.5, 0.5)
+		listEmpty.Position = UDim2.fromScale(0.5, 0.5)
+		listEmpty.Size = UDim2.new(1, -20, 0, 20)
+		listEmpty.Font = Enum.Font.GothamMedium
+		listEmpty.Text = "No tools"
+		listEmpty.TextColor3 = TEXT_DIM
+		listEmpty.TextSize = 13
+		listEmpty.Parent = listCard
+
+		local card = Instance.new("Frame")
+		card.Name = "ToolViewport"
+		card.Position = UDim2.fromOffset(264, 62)
+		card.Size = UDim2.new(1, -284, 1, -78)
+		card.BackgroundColor3 = CARD_BG
+		card.BorderSizePixel = 0
+		card.Parent = page
+		addCorner(card)
+		addStroke(card, STROKE)
+
 		local emptyLabel = Instance.new("TextLabel")
 		emptyLabel.BackgroundTransparency = 1
 		emptyLabel.AnchorPoint = Vector2.new(0.5, 0.5)
-		emptyLabel.Position    = UDim2.fromScale(0.5, 0.55)
-		emptyLabel.Size        = UDim2.new(1, -40, 0, 20)
-		emptyLabel.Font        = Enum.Font.GothamMedium
-		emptyLabel.Text        = "No tool equipped"
-		emptyLabel.TextColor3  = TEXT_DIM
-		emptyLabel.TextSize    = 13
-		emptyLabel.Visible     = true
-		emptyLabel.Parent      = page
-
-		-- ============================================================
-		-- viewport card
-		-- ============================================================
-		local card = Instance.new("Frame")
-		card.Name             = "ToolViewport"
-		card.Position         = UDim2.fromOffset(20, 66)
-		card.Size             = UDim2.new(1, -40, 1, -82)
-		card.BackgroundColor3 = CARD_BG
-		card.BorderSizePixel  = 0
-		card.Visible          = false
-		card.Parent           = page
-		addCorner(card)
-		addStroke(card, Color3.fromRGB(42, 42, 47))
+		emptyLabel.Position = UDim2.fromScale(0.5, 0.5)
+		emptyLabel.Size = UDim2.new(1, -20, 0, 20)
+		emptyLabel.Font = Enum.Font.GothamMedium
+		emptyLabel.Text = "Select a tool"
+		emptyLabel.TextColor3 = TEXT_DIM
+		emptyLabel.TextSize = 13
+		emptyLabel.Parent = card
 
 		local vp = Instance.new("ViewportFrame")
 		vp.BackgroundTransparency = 1
@@ -93,6 +211,7 @@ return function(lib)
 		vp.LightColor             = Color3.fromRGB(220, 220, 228)
 		vp.LightDirection         = Vector3.new(-1, -2, -1)
 		vp.Ambient                = Color3.fromRGB(80, 80, 88)
+		vp.Visible                = false
 		vp.Parent                 = card
 
 		local worldModel = Instance.new("WorldModel")
@@ -102,9 +221,27 @@ return function(lib)
 		vpCam.Parent  = vp
 		vp.CurrentCamera = vpCam
 
-		-- ============================================================
-		-- tool name + sub-label at the bottom of the card
-		-- ============================================================
+		-- gradient overlay at the bottom so labels read cleanly
+		local grad = Instance.new("Frame")
+		grad.AnchorPoint      = Vector2.new(0, 1)
+		grad.Position         = UDim2.fromScale(0, 1)
+		grad.Size             = UDim2.new(1, 0, 0, 60)
+		grad.BackgroundColor3 = CARD_BG
+		grad.BorderSizePixel  = 0
+		grad.ZIndex           = 2
+		grad.Visible          = false
+		grad.Parent           = card
+		local gradCorner = Instance.new("UICorner")
+		gradCorner.CornerRadius = UDim.new(0, 5)
+		gradCorner.Parent = grad
+		local gradGrad = Instance.new("UIGradient")
+		gradGrad.Rotation = 90
+		gradGrad.Transparency = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 1),
+			NumberSequenceKeypoint.new(1, 0),
+		})
+		gradGrad.Parent = grad
+
 		local nameLabel = Instance.new("TextLabel")
 		nameLabel.BackgroundTransparency = 1
 		nameLabel.AnchorPoint  = Vector2.new(0.5, 1)
@@ -115,6 +252,7 @@ return function(lib)
 		nameLabel.TextColor3   = TEXT_MAIN
 		nameLabel.TextSize     = 15
 		nameLabel.TextTruncate = Enum.TextTruncate.AtEnd
+		nameLabel.ZIndex       = 3
 		nameLabel.Parent       = card
 
 		local subLabel = Instance.new("TextLabel")
@@ -127,31 +265,35 @@ return function(lib)
 		subLabel.TextColor3   = TEXT_DIM
 		subLabel.TextSize     = 12
 		subLabel.TextTruncate = Enum.TextTruncate.AtEnd
+		subLabel.ZIndex       = 3
 		subLabel.Parent       = card
 
-		-- ============================================================
-		-- gradient overlay at the bottom so labels read cleanly
-		-- ============================================================
-		local grad = Instance.new("Frame")
-		grad.AnchorPoint      = Vector2.new(0, 1)
-		grad.Position         = UDim2.fromScale(0, 1)
-		grad.Size             = UDim2.new(1, 0, 0, 60)
-		grad.BackgroundColor3 = CARD_BG
-		grad.BorderSizePixel  = 0
-		grad.ZIndex           = 2
-		grad.Parent           = card
-		local gradCorner = Instance.new("UICorner")
-		gradCorner.CornerRadius = UDim.new(0, 5)
-		gradCorner.Parent = grad
-		local gradGrad = Instance.new("UIGradient")
-		gradGrad.Rotation = 90
-		gradGrad.Transparency = NumberSequence.new({
-			NumberSequenceKeypoint.new(0, 1),
-			NumberSequenceKeypoint.new(1, 0),
-		})
-		gradGrad.Parent = grad
-		nameLabel.ZIndex = 3
-		subLabel.ZIndex  = 3
+		-- Equip / Unequip button (top-right of the preview)
+		local equipBtn = Instance.new("TextButton")
+		equipBtn.Name = "EquipButton"
+		equipBtn.AnchorPoint = Vector2.new(1, 0)
+		equipBtn.Position = UDim2.new(1, -10, 0, 10)
+		equipBtn.Size = UDim2.fromOffset(80, 26)
+		equipBtn.BackgroundColor3 = Color3.fromRGB(36, 36, 41)
+		equipBtn.BorderSizePixel = 0
+		equipBtn.AutoButtonColor = false
+		equipBtn.Font = Enum.Font.GothamMedium
+		equipBtn.Text = "Equip"
+		equipBtn.TextColor3 = Color3.fromRGB(215, 215, 220)
+		equipBtn.TextSize = 13
+		equipBtn.ZIndex = 5
+		equipBtn.Visible = false
+		equipBtn.Parent = card
+		addCorner(equipBtn)
+		local equipStroke = addStroke(equipBtn, Color3.fromRGB(46, 46, 51))
+		equipBtn.MouseEnter:Connect(function()
+			TweenService:Create(equipBtn, fadeInfo, {BackgroundColor3 = Color3.fromRGB(48, 48, 55), TextColor3 = TEXT_MAIN}):Play()
+			TweenService:Create(equipStroke, fadeInfo, {Color = Color3.fromRGB(95, 95, 104)}):Play()
+		end)
+		equipBtn.MouseLeave:Connect(function()
+			TweenService:Create(equipBtn, fadeInfo, {BackgroundColor3 = Color3.fromRGB(36, 36, 41), TextColor3 = Color3.fromRGB(215, 215, 220)}):Play()
+			TweenService:Create(equipStroke, fadeInfo, {Color = Color3.fromRGB(46, 46, 51)}):Play()
+		end)
 
 		-- ============================================================
 		-- GUN MODS: side panel for specific guns
@@ -167,7 +309,8 @@ return function(lib)
 		local rapidOn  = false
 		local noSlowOn = false
 
-		local activeGun
+		local selectedTool -- what you picked in the grid
+		local equippedGun  -- the equipped tool, if it's one of GUNS (this is what fires)
 		local gunConns = {}
 		local mouseHeld, firing = false, false
 		local fireAcc = 0
@@ -186,13 +329,12 @@ return function(lib)
 		panel.Visible = false
 		panel.Parent = win.frame
 		addCorner(panel)
-		addStroke(panel, Color3.fromRGB(42, 42, 47))
+		addStroke(panel, STROKE)
 
 		local panelScale = Instance.new("UIScale")
 		panelScale.Scale = 0.92
 		panelScale.Parent = panel
 
-		-- header
 		local panelTitle = Instance.new("TextLabel")
 		panelTitle.BackgroundTransparency = 1
 		panelTitle.Position = UDim2.fromOffset(14, 9)
@@ -328,11 +470,11 @@ return function(lib)
 			local row = Instance.new("Frame")
 			row.Position = UDim2.fromOffset(122, y)
 			row.Size = UDim2.new(1, -136, 0, 58)
-			row.BackgroundColor3 = Color3.fromRGB(28, 28, 32)
+			row.BackgroundColor3 = TILE_BG
 			row.BorderSizePixel = 0
 			row.Parent = panel
 			addCorner(row)
-			addStroke(row, Color3.fromRGB(42, 42, 47))
+			addStroke(row, STROKE)
 
 			local label = Instance.new("TextLabel")
 			label.BackgroundTransparency = 1
@@ -403,7 +545,7 @@ return function(lib)
 		hint.Position = UDim2.fromOffset(122, 190)
 		hint.Size = UDim2.new(1, -136, 0, 48)
 		hint.Font = Enum.Font.Gotham
-		hint.Text = "Hold left mouse to fire at the set rate."
+		hint.Text = ""
 		hint.TextColor3 = Color3.fromRGB(90, 90, 96)
 		hint.TextSize = 11
 		hint.TextWrapped = true
@@ -440,9 +582,12 @@ return function(lib)
 		-- ---------- show / hide the panel ----------
 		local panelShown = false
 		local function updatePanel()
-			local want = activeGun ~= nil and page.Visible
-			if activeGun then
-				panelGun.Text = activeGun.Name
+			local isGun = selectedTool ~= nil and GUNS[selectedTool.Name] == true
+			local want = isGun and page.Visible
+			if isGun then
+				panelGun.Text = selectedTool.Name
+				local equipped = selectedTool.Parent == lp.Character
+				hint.Text = equipped and "Hold left mouse to fire at the set rate." or "Equip this tool to use these mods."
 			end
 			if want == panelShown then
 				return
@@ -476,7 +621,7 @@ return function(lib)
 				or UDim2.new(0, -(SIDE_GAP + SIDE_W / 2), 0.5, 0)
 		end))
 
-		-- ---------- which gun is equipped ----------
+		-- ---------- the equipped gun (this is the one that fires) ----------
 		local function clearGunConns()
 			for _, c in ipairs(gunConns) do
 				c:Disconnect()
@@ -484,11 +629,14 @@ return function(lib)
 			table.clear(gunConns)
 		end
 
-		local function setActiveGun(tool)
+		local function setEquippedGun(tool)
+			if tool == equippedGun then
+				return
+			end
 			clearGunConns()
-			if tool and GUNS[tool.Name] then
-				activeGun = tool
-				baseSpeed = nil
+			equippedGun = tool
+			baseSpeed = nil
+			if tool then
 				table.insert(gunConns, tool.Activated:Connect(function()
 					lastAction = os.clock()
 				end))
@@ -499,16 +647,14 @@ return function(lib)
 					end))
 				end
 			else
-				activeGun = nil
 				firing = false
 				mouseHeld = false
 			end
-			updatePanel()
 		end
 
 		-- ---------- rapid fire + no slowdown ----------
 		table.insert(conns, UserInputService.InputBegan:Connect(function(input, gp)
-			if gp or not activeGun then
+			if gp or not equippedGun then
 				return
 			end
 			if input.UserInputType == Enum.UserInputType.MouseButton1 then
@@ -533,12 +679,12 @@ return function(lib)
 				pcall(gunHandler.Shoot, gunHandler)
 			end
 			pcall(function()
-				activeGun:Activate()
+				equippedGun:Activate()
 			end)
 		end
 
 		table.insert(conns, RunService.Heartbeat:Connect(function(dt)
-			local gun = activeGun
+			local gun = equippedGun
 			if not gun or gun.Parent ~= lp.Character then
 				return
 			end
@@ -576,196 +722,329 @@ return function(lib)
 		end))
 
 		-- ============================================================
-		-- bounds + camera helpers
+		-- big 3D preview of the selected tool
 		-- ============================================================
 		local angle   = 0
-		local ORBIT_R = 4   -- camera distance (adjusted per tool size)
-		local ORBIT_Y = 1.2 -- height above the tool's centre
-
-		-- bounding box of the *visible* parts only (ignores invisible hitboxes
-		-- and giant effect parts that would stretch the box and push the camera away)
-		local function getBounds(model)
-			local function scan(onlyVisible)
-				local minP = Vector3.new(math.huge, math.huge, math.huge)
-				local maxP = Vector3.new(-math.huge, -math.huge, -math.huge)
-				local found = false
-				for _, part in ipairs(model:GetDescendants()) do
-					if part:IsA("BasePart") then
-						local big = math.max(part.Size.X, part.Size.Y, part.Size.Z)
-						if not onlyVisible or (part.Transparency < 0.95 and big < 30) then
-							local s = part.Size / 2
-							for _, sx in ipairs({-1, 1}) do
-								for _, sy in ipairs({-1, 1}) do
-									for _, sz in ipairs({-1, 1}) do
-										local w = part.CFrame:PointToWorldSpace(Vector3.new(s.X * sx, s.Y * sy, s.Z * sz))
-										minP = Vector3.new(math.min(minP.X, w.X), math.min(minP.Y, w.Y), math.min(minP.Z, w.Z))
-										maxP = Vector3.new(math.max(maxP.X, w.X), math.max(maxP.Y, w.Y), math.max(maxP.Z, w.Z))
-									end
-								end
-							end
-							found = true
-						end
-					end
-				end
-				return found, minP, maxP
-			end
-
-			local found, minP, maxP = scan(true)
-			if not found then
-				found, minP, maxP = scan(false) -- nothing visible, fall back to every part
-			end
-			if not found then
-				return Vector3.new(-1, -1, -1), Vector3.new(1, 1, 1)
-			end
-			return minP, maxP
-		end
-
-		local function fitCamera(clone)
-			local minP, maxP = getBounds(clone)
-			local size = math.clamp((maxP - minP).Magnitude, 0.5, 20)
-			ORBIT_R = math.max(2.5, size * 1.4)
-			ORBIT_Y = (minP.Y + maxP.Y) / 2 + size * 0.12
-		end
-
-		-- ============================================================
-		-- load / clear tool clone
-		-- ============================================================
+		local ORBIT_R = 4
+		local ORBIT_Y = 1.2
 		local toolClone
-		local toolCentre = Vector3.zero
 		local orbitConn
-		local loadToken = 0 -- bumped on every load/clear so stale loads can cancel themselves
+		local previewToken = 0 -- bumped on every load/clear so stale loads cancel themselves
 
 		local function removeClone()
 			if orbitConn then orbitConn:Disconnect(); orbitConn = nil end
 			if toolClone then toolClone:Destroy(); toolClone = nil end
 		end
 
-		local function clearTool()
-			loadToken += 1
+		local function clearPreview()
+			previewToken += 1
 			removeClone()
-			setActiveGun(nil)
-			card.Visible       = false
+			vp.Visible = false
+			grad.Visible = false
 			emptyLabel.Visible = true
-			nameLabel.Text     = ""
-			subLabel.Text      = ""
+			nameLabel.Text = ""
+			subLabel.Text = ""
 		end
 
-		local function loadTool(tool)
-			if not tool then
-				clearTool()
-				return
-			end
-
-			loadToken += 1
-			local token = loadToken
-
-			setActiveGun(tool) -- gun mods work right away, no need to wait for the preview
+		local function loadPreview(tool)
+			previewToken += 1
+			local token = previewToken
 
 			-- parts can still be mid-weld right after equipping
-			task.wait(0.15)
-			if token ~= loadToken or tool.Parent ~= lp.Character then
+			task.wait(0.1)
+			local bp = lp:FindFirstChild("Backpack")
+			if token ~= previewToken or (tool.Parent ~= lp.Character and tool.Parent ~= bp) then
 				return
 			end
 
 			removeClone()
-
-			-- clone into WorldModel (exclude scripts so nothing fires)
-			local clone = Instance.new("Model")
-			for _, child in ipairs(tool:GetChildren()) do
-				if not child:IsA("Script") and not child:IsA("LocalScript")
-					and not child:IsA("ModuleScript") then
-					child:Clone().Parent = clone
-				end
-			end
-			if not next(clone:GetChildren()) then
-				clone:Destroy()
+			local clone, size = cloneToolModel(tool)
+			if not clone then
+				clearPreview()
 				return
 			end
-
-			-- zero out velocities and anchor everything
-			for _, part in ipairs(clone:GetDescendants()) do
-				if part:IsA("BasePart") then
-					part.Anchored    = true
-					part.CastShadow  = false
-					part.Velocity    = Vector3.zero
-					part.RotVelocity = Vector3.zero
-				end
-			end
-
 			clone.Parent = worldModel
-			toolClone    = clone
+			toolClone = clone
 
-			-- centre the model on its visible parts
-			local minP, maxP = getBounds(clone)
-			local offset = CFrame.new(-((minP + maxP) / 2))
-			for _, part in ipairs(clone:GetDescendants()) do
-				if part:IsA("BasePart") then
-					part.CFrame = offset * part.CFrame
-				end
-			end
-			toolCentre = Vector3.zero
+			ORBIT_R = math.max(2.5, size * 1.4)
+			ORBIT_Y = size * 0.12
 
-			fitCamera(clone)
-
-			card.Visible       = true
+			vp.Visible = true
+			grad.Visible = true
 			emptyLabel.Visible = false
-			nameLabel.Text     = tool.Name
-			subLabel.Text      = tool.ToolTip ~= "" and tool.ToolTip or "Equipped tool"
+			nameLabel.Text = tool.Name
+			subLabel.Text = tool.ToolTip ~= "" and tool.ToolTip or "Tool"
 
-			-- orbit animation
 			angle = 0
 			orbitConn = RunService.RenderStepped:Connect(function(dt)
 				angle += dt * 0.6
-				local x = toolCentre.X + math.cos(angle) * ORBIT_R
-				local z = toolCentre.Z + math.sin(angle) * ORBIT_R
-				local eye    = Vector3.new(x, ORBIT_Y, z)
-				local target = Vector3.new(toolCentre.X, ORBIT_Y * 0.5, toolCentre.Z)
+				local eye    = Vector3.new(math.cos(angle) * ORBIT_R, ORBIT_Y, math.sin(angle) * ORBIT_R)
+				local target = Vector3.new(0, ORBIT_Y * 0.5, 0)
 				vpCam.CFrame = CFrame.lookAt(eye, target)
 			end)
 		end
 
 		-- ============================================================
-		-- watch for equip / unequip
+		-- tool grid (tiles)
+		-- ============================================================
+		local tiles = {} -- [tool] = {frame, stroke, dot}
+		local selectTool, toggleEquip, refreshTiles
+
+		local function makeIcon(tool, parent)
+			if tool.TextureId ~= "" then
+				local img = Instance.new("ImageLabel")
+				img.BackgroundTransparency = 1
+				img.Position = UDim2.fromOffset(6, 5)
+				img.Size = UDim2.new(1, -12, 0, 48)
+				img.Image = tool.TextureId
+				img.ScaleType = Enum.ScaleType.Fit
+				img.Parent = parent
+				return
+			end
+
+			-- no icon: render the tool itself, small and still
+			local iconVp = Instance.new("ViewportFrame")
+			iconVp.BackgroundTransparency = 1
+			iconVp.Position = UDim2.fromOffset(4, 3)
+			iconVp.Size = UDim2.new(1, -8, 0, 52)
+			iconVp.LightColor = Color3.fromRGB(220, 220, 228)
+			iconVp.LightDirection = Vector3.new(-1, -2, -1)
+			iconVp.Ambient = Color3.fromRGB(90, 90, 98)
+			iconVp.Parent = parent
+
+			local ok = pcall(function()
+				local clone, size = cloneToolModel(tool)
+				if not clone then
+					return
+				end
+				clone.Parent = iconVp
+				local cam = Instance.new("Camera")
+				cam.FieldOfView = 40
+				local dist = math.max(2, size * 1.5)
+				cam.CFrame = CFrame.lookAt(Vector3.new(dist * 0.7, dist * 0.45, dist * 0.7), Vector3.zero)
+				cam.Parent = iconVp
+				iconVp.CurrentCamera = cam
+			end)
+			if not ok then
+				iconVp:Destroy()
+			end
+		end
+
+		local function addTile(tool)
+			local frame = Instance.new("Frame")
+			frame.Name = tool.Name
+			frame.BackgroundColor3 = TILE_BG
+			frame.BorderSizePixel = 0
+			frame.Parent = listScroll
+			addCorner(frame)
+			local stroke = addStroke(frame, STROKE)
+
+			makeIcon(tool, frame)
+
+			local label = Instance.new("TextLabel")
+			label.BackgroundTransparency = 1
+			label.Position = UDim2.fromOffset(3, 58)
+			label.Size = UDim2.new(1, -6, 0, 14)
+			label.Font = Enum.Font.GothamMedium
+			label.Text = tool.Name
+			label.TextColor3 = TEXT_SOFT
+			label.TextSize = 10
+			label.TextTruncate = Enum.TextTruncate.AtEnd
+			label.Parent = frame
+
+			-- small dot = currently equipped
+			local dot = Instance.new("Frame")
+			dot.AnchorPoint = Vector2.new(1, 0)
+			dot.Position = UDim2.new(1, -5, 0, 5)
+			dot.Size = UDim2.fromOffset(7, 7)
+			dot.BackgroundColor3 = Color3.fromRGB(90, 200, 120)
+			dot.BorderSizePixel = 0
+			dot.Visible = false
+			dot.ZIndex = 3
+			dot.Parent = frame
+			addCorner(dot, 4)
+
+			local hit = Instance.new("TextButton")
+			hit.BackgroundTransparency = 1
+			hit.AutoButtonColor = false
+			hit.Text = ""
+			hit.Size = UDim2.fromScale(1, 1)
+			hit.ZIndex = 4
+			hit.Parent = frame
+
+			hit.MouseEnter:Connect(function()
+				if selectedTool ~= tool then
+					TweenService:Create(stroke, fadeInfo, {Color = STROKE_HOVER}):Play()
+				end
+			end)
+			hit.MouseLeave:Connect(function()
+				TweenService:Create(stroke, fadeInfo, {Color = selectedTool == tool and STROKE_SEL or STROKE}):Play()
+			end)
+
+			-- click = select, double click = equip / unequip
+			local lastClick = 0
+			hit.MouseButton1Click:Connect(function()
+				local now = os.clock()
+				if selectedTool == tool and now - lastClick < 0.4 then
+					toggleEquip(tool)
+				else
+					selectTool(tool)
+				end
+				lastClick = now
+			end)
+
+			tiles[tool] = {frame = frame, stroke = stroke, dot = dot}
+		end
+
+		local function removeTile(tool)
+			local t = tiles[tool]
+			if t then
+				t.frame:Destroy()
+				tiles[tool] = nil
+			end
+		end
+
+		function refreshTiles()
+			local char = lp.Character
+			for tool, t in pairs(tiles) do
+				local selected = tool == selectedTool
+				TweenService:Create(t.frame, fadeInfo, {BackgroundColor3 = selected and TILE_BG_SEL or TILE_BG}):Play()
+				TweenService:Create(t.stroke, fadeInfo, {Color = selected and STROKE_SEL or STROKE}):Play()
+				t.dot.Visible = tool.Parent == char
+			end
+			if selectedTool then
+				equipBtn.Visible = true
+				equipBtn.Text = selectedTool.Parent == char and "Unequip" or "Equip"
+			else
+				equipBtn.Visible = false
+			end
+			listEmpty.Visible = next(tiles) == nil
+			updatePanel()
+		end
+
+		function selectTool(tool)
+			selectedTool = tool
+			refreshTiles()
+			if tool then
+				task.spawn(loadPreview, tool)
+			else
+				clearPreview()
+			end
+		end
+
+		function toggleEquip(tool)
+			local char = lp.Character
+			local hum = char and char:FindFirstChildOfClass("Humanoid")
+			if not hum then
+				return
+			end
+			if tool.Parent == char then
+				hum:UnequipTools()
+			elseif tool.Parent == lp:FindFirstChild("Backpack") then
+				hum:EquipTool(tool)
+			end
+		end
+
+		equipBtn.MouseButton1Click:Connect(function()
+			if selectedTool then
+				toggleEquip(selectedTool)
+			end
+		end)
+
+		-- ============================================================
+		-- keep the grid in sync with backpack + character
 		-- ============================================================
 		local function getEquipped(char)
 			return char and char:FindFirstChildOfClass("Tool")
 		end
 
-		local charConns = {}
+		local lastEquipped
+		local rebuildQueued = false
 
-		local function watchChar(char)
-			for _, c in ipairs(charConns) do c:Disconnect() end
-			charConns = {}
-
-			if not char then clearTool(); return end
-
-			task.spawn(loadTool, getEquipped(char))
-
-			table.insert(charConns, char.ChildAdded:Connect(function(child)
-				if child:IsA("Tool") then task.spawn(loadTool, child) end
-			end))
-			table.insert(charConns, char.ChildRemoved:Connect(function(child)
-				if child:IsA("Tool") then
-					-- slight delay so the new tool (if swapping) can arrive first
-					task.delay(0.05, function()
-						local newTool = getEquipped(char)
-						if newTool then loadTool(newTool) else clearTool() end
-					end)
+		local function rebuild()
+			local seen = {}
+			local function consider(container)
+				if container then
+					for _, child in ipairs(container:GetChildren()) do
+						if child:IsA("Tool") then
+							seen[child] = true
+							if not tiles[child] then
+								addTile(child)
+							end
+						end
+					end
 				end
-			end))
+			end
+			consider(lp:FindFirstChild("Backpack"))
+			consider(lp.Character)
+			for tool in pairs(tiles) do
+				if not seen[tool] then
+					removeTile(tool)
+				end
+			end
+
+			-- the selected tool disappeared (dropped, died, ...)
+			if selectedTool and not seen[selectedTool] then
+				selectTool(nil)
+			end
+
+			-- equipping something selects it, and updates which gun fires
+			local equipped = getEquipped(lp.Character)
+			setEquippedGun(equipped and GUNS[equipped.Name] and equipped or nil)
+			if equipped ~= lastEquipped then
+				lastEquipped = equipped
+				if equipped and selectedTool ~= equipped then
+					selectTool(equipped)
+				end
+			end
+
+			refreshTiles()
 		end
 
-		watchChar(lp.Character)
-		local charAddedConn = lp.CharacterAdded:Connect(watchChar)
+		-- several events fire for one equip (backpack removal + character add), so batch them
+		local function queueRebuild()
+			if rebuildQueued then
+				return
+			end
+			rebuildQueued = true
+			task.delay(0.05, function()
+				rebuildQueued = false
+				rebuild()
+			end)
+		end
+
+		local invConns = {}
+		local function bindInventory(char)
+			for _, c in ipairs(invConns) do
+				c:Disconnect()
+			end
+			table.clear(invConns)
+
+			local backpack = lp:FindFirstChild("Backpack") or lp:WaitForChild("Backpack", 5)
+			if backpack then
+				table.insert(invConns, backpack.ChildAdded:Connect(queueRebuild))
+				table.insert(invConns, backpack.ChildRemoved:Connect(queueRebuild))
+			end
+			if char then
+				table.insert(invConns, char.ChildAdded:Connect(queueRebuild))
+				table.insert(invConns, char.ChildRemoved:Connect(queueRebuild))
+			end
+			rebuild()
+		end
+
+		task.spawn(bindInventory, lp.Character)
+		local charAddedConn = lp.CharacterAdded:Connect(function(char)
+			task.spawn(bindInventory, char)
+		end)
 
 		win.onClose(function()
 			charAddedConn:Disconnect()
-			for _, c in ipairs(charConns) do c:Disconnect() end
+			for _, c in ipairs(invConns) do c:Disconnect() end
 			for _, c in ipairs(conns) do c:Disconnect() end
 			table.clear(conns)
 			clearGunConns()
 			firing = false
-			clearTool()
+			clearPreview()
 		end)
 	end
 end
