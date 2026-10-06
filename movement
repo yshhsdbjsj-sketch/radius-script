@@ -693,7 +693,7 @@ return function(lib)
 		-- ----------------------------------------------------
 		-- No Jump Cooldown (switch-only)
 		-- Three things stop you from jumping again right away:
-		--   1. the landing delay        -> the Landed state is switched off while this is on
+		--   1. the landing delay        -> the Landed state is skipped (straight back to Running)
 		--   2. a game-side jump lock    -> the Jumping state is switched back on, and a jump power
 		--                                  that the game set to 0 is restored
 		--   3. having to re-press jump  -> holding jump (key or mobile button) jumps the moment you
@@ -726,15 +726,12 @@ return function(lib)
 				return
 			end
 			noJumpCD._hum = hum
-			noJumpCD._landedWas = hum:GetStateEnabled(STATE_LANDED)
 			local power = hum.UseJumpPower and hum.JumpPower or hum.JumpHeight
 			noJumpCD._power = power > 0 and power or nil
-			pcall(function()
-				hum:SetStateEnabled(STATE_LANDED, false)
-			end)
-			-- if a landing / get-up still sneaks through, skip straight back to running
+			-- the Landed state is NOT disabled (that leaves the character stuck in the falling pose, torso on
+			-- the ground). Instead it is skipped: Landed -> Running right away, so the legs stand up normally.
 			jumpCDStateConn = hum.StateChanged:Connect(function(_, new)
-				if noJumpCD.active and (new == STATE_LANDED or new == Enum.HumanoidStateType.GettingUp) then
+				if noJumpCD.active and new == STATE_LANDED then
 					pcall(function()
 						hum:ChangeState(Enum.HumanoidStateType.Running)
 					end)
@@ -754,11 +751,8 @@ return function(lib)
 				wireJumpCD(hum) -- the humanoid was replaced
 			end
 
-			-- keep the landing delay off and the jumping state on, even if the game flips them back
+			-- keep the jumping state on, even if the game turns it off as a cooldown
 			pcall(function()
-				if hum:GetStateEnabled(STATE_LANDED) then
-					hum:SetStateEnabled(STATE_LANDED, false)
-				end
 				if not hum:GetStateEnabled(STATE_JUMPING) then
 					hum:SetStateEnabled(STATE_JUMPING, true)
 				end
@@ -795,12 +789,6 @@ return function(lib)
 					if jumpCDStateConn then
 						jumpCDStateConn:Disconnect()
 						jumpCDStateConn = nil
-					end
-					local hum = noJumpCD._hum
-					if hum and hum.Parent then
-						pcall(function()
-							hum:SetStateEnabled(STATE_LANDED, noJumpCD._landedWas ~= false)
-						end)
 					end
 					noJumpCD._hum = nil
 					noJumpCD._power = nil
