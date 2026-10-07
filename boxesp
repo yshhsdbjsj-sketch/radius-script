@@ -145,6 +145,210 @@ return function(lib)
 	-- ========================================================
 	-- geometry
 	-- ========================================================
+	-- ========================================================
+	-- status (Idle / Moving / Jumping / Dead)
+	-- ========================================================
+	local STATUS_LIST = {"Idle", "Moving", "Jumping", "Dead"}
+	local STATUS_KEY = {Idle = "stIdle", Moving = "stMove", Jumping = "stJump", Dead = "stDead"}
+
+	local function statusOf(hum, root)
+		if hum.Health <= 0 then
+			return "Dead"
+		end
+		local st = hum:GetState()
+		if st == Enum.HumanoidStateType.Jumping or st == Enum.HumanoidStateType.Freefall then
+			return "Jumping"
+		end
+		local v = root.AssemblyLinearVelocity
+		if Vector3.new(v.X, 0, v.Z).Magnitude > 1.5 then
+			return "Moving"
+		end
+		return "Idle"
+	end
+
+	-- ========================================================
+	-- chams module: Normal / Solid / Glow / Textured / Wireframe / Textured Wireframe
+	--   Normal              Highlight: fill + outline
+	--   Solid               Highlight: opaque flat fill, no outline
+	--   Glow                Neon material on the body + pulsing Highlight
+	--   Textured            ForceField material (animated pattern) on the body + Highlight
+	--   Wireframe           wire edges on every body part (outline color)
+	--   Textured Wireframe  Textured + Wireframe
+	-- the material is changed on this client only and put back when chams turn off
+	-- ========================================================
+	local CHAM_MODES = {"Normal", "Solid", "Glow", "Textured", "Wireframe", "Textured Wireframe"}
+	local MODE_WIRE = {Wireframe = true, ["Textured Wireframe"] = true}
+	local MODE_MATERIAL = {
+		Glow = Enum.Material.Neon,
+		Textured = Enum.Material.ForceField,
+		["Textured Wireframe"] = Enum.Material.ForceField,
+	}
+
+	local WIRE_EDGES = {}
+	for c = 0, 7 do
+		for _, bit in ipairs({1, 2, 4}) do
+			if not hasBit(c, bit) then
+				local c2 = c + bit
+				table.insert(WIRE_EDGES, {
+					hasBit(c, 1) and 1 or -1, hasBit(c, 2) and 1 or -1, hasBit(c, 4) and 1 or -1,
+					hasBit(c2, 1) and 1 or -1, hasBit(c2, 2) and 1 or -1, hasBit(c2, 4) and 1 or -1,
+				})
+			end
+		end
+	end
+
+	local Chams = {}
+
+	local function chamPart(p)
+		return p:IsA("BasePart") and p.Name ~= "HumanoidRootPart"
+	end
+
+	function Chams.restoreParts(st)
+		for part, o in pairs(st.orig) do
+			if part.Parent then
+				part.Material = o[1]
+				part.Color = o[2]
+			end
+		end
+		st.orig = {}
+		st.matKey = nil
+	end
+
+	function Chams.clearWires(st)
+		for _, w in pairs(st.wires) do
+			pcall(function() w:Destroy() end)
+		end
+		st.wires = {}
+	end
+
+	-- hide everything (the player is filtered out / chams are off)
+	function Chams.hide(st)
+		if st.hl then
+			st.hl.Enabled = false
+		end
+		if next(st.orig) then
+			Chams.restoreParts(st)
+		end
+		for _, w in pairs(st.wires) do
+			w.Visible = false
+		end
+	end
+
+	function Chams.destroy(st)
+		pcall(Chams.restoreParts, st)
+		Chams.clearWires(st)
+		if st.hl then
+			pcall(function() st.hl:Destroy() end)
+		end
+	end
+
+	-- cfg: mode, walls (bool), fill / outline (Color3), fillA / outA (0-1), fade (0-1), folder
+	function Chams.update(rec, char, cfg)
+		local st = rec.cham
+		if not st then
+			st = {orig = {}, wires = {}, scanAt = 0, wireAt = 0}
+			rec.cham = st
+		end
+		local h = st.hl
+		if not h or not h.Parent then
+			h = Instance.new("Highlight")
+			h.Name = "EspCham"
+			h.Parent = cfg.folder
+			st.hl = h
+		end
+		if st.char ~= char then
+			-- new character: forget the old one
+			Chams.restoreParts(st)
+			Chams.clearWires(st)
+			st.char = char
+			st.scanAt, st.wireAt = 0, 0
+		end
+		if h.Adornee ~= char then
+			h.Adornee = char
+		end
+
+		local mode = cfg.mode
+		local now = os.clock()
+		local fillT, outT = 1 - cfg.fillA * cfg.fade, 1 - cfg.outA * cfg.fade
+		if mode == "Solid" then
+			fillT, outT = 1 - cfg.fade, 1
+		elseif mode == "Glow" then
+			local pulse = 0.5 + 0.5 * math.sin(now * 3)
+			fillT = 1 - cfg.fillA * cfg.fade * (0.35 + 0.65 * pulse)
+			outT = 1 - cfg.fade
+		elseif mode == "Textured" or mode == "Textured Wireframe" then
+			fillT = 1 - cfg.fillA * cfg.fade * 0.5
+		elseif mode == "Wireframe" then
+			fillT, outT = 1, 1
+		end
+		h.FillColor = cfg.fill
+		h.FillTransparency = fillT
+		h.OutlineColor = cfg.outline
+		h.OutlineTransparency = outT
+		h.DepthMode = cfg.walls and Enum.HighlightDepthMode.AlwaysOnTop or Enum.HighlightDepthMode.Occluded
+		h.Enabled = true
+
+		-- material on the body parts
+		local mat = MODE_MATERIAL[mode]
+		if mat then
+			if now >= st.scanAt then
+				st.scanAt = now + 1 -- look for new parts (accessories, tools) once a second
+				st.matKey = nil
+			end
+			if st.matKey ~= mat or st.matColor ~= cfg.fill then
+				st.matKey, st.matColor = mat, cfg.fill
+				for _, p in ipairs(char:GetDescendants()) do
+					if chamPart(p) and (st.orig[p] or p.Transparency < 1) then
+						if not st.orig[p] then
+							st.orig[p] = {p.Material, p.Color}
+						end
+						p.Material = mat
+						p.Color = cfg.fill
+					end
+				end
+			end
+		elseif next(st.orig) then
+			Chams.restoreParts(st)
+		end
+
+		-- wireframe: one WireframeHandleAdornment per body part, built once in the part's own space
+		if MODE_WIRE[mode] then
+			if now >= st.wireAt then
+				st.wireAt = now + 1
+				for _, p in ipairs(char:GetDescendants()) do
+					if chamPart(p) and p.Transparency < 1 and not st.wires[p] then
+						local ok, w = pcall(Instance.new, "WireframeHandleAdornment")
+						if ok and w then
+							w.Adornee = p
+							local hx, hy, hz = p.Size.X / 2, p.Size.Y / 2, p.Size.Z / 2
+							for _, e in ipairs(WIRE_EDGES) do
+								w:AddLine(Vector3.new(e[1] * hx, e[2] * hy, e[3] * hz), Vector3.new(e[4] * hx, e[5] * hy, e[6] * hz))
+							end
+							pcall(function() w.Thickness = 1.5 end)
+							w.Parent = cfg.folder
+							st.wires[p] = w
+						end
+					end
+				end
+				for p, w in pairs(st.wires) do
+					if not p.Parent then
+						pcall(function() w:Destroy() end)
+						st.wires[p] = nil
+					end
+				end
+			end
+			local wt = 1 - cfg.outA * cfg.fade
+			for _, w in pairs(st.wires) do
+				w.Color3 = cfg.outline
+				w.Transparency = wt
+				w.AlwaysOnTop = cfg.walls
+				w.Visible = true
+			end
+		elseif next(st.wires) then
+			Chams.clearWires(st)
+		end
+	end
+
 	local segs = {}
 	for i = 1, SEG_MAX do
 		segs[i] = {0, 0, 0, 0}
@@ -410,14 +614,14 @@ return function(lib)
 
 		local FEATURES = {
 			"Box", "BoxFill", "Chams", "Name", "Health", "Armor", "ArmorText", "HealthText", "Skeleton",
-			"HeadDot", "LookDir", "Tracers", "Arrows", "Distance", "Weapon", "TeamColors",
+			"HeadDot", "LookDir", "Tracers", "Arrows", "Distance", "Weapon", "Status", "TeamColors",
 		}
 		local LABELS = {
 			Box = "Box Esp", BoxFill = "Box Fill", Chams = "Chams", Name = "Name Esp",
 			Health = "Health Bar", Armor = "Armor Bar", ArmorText = "Armor Text", HealthText = "Health Text",
 			Skeleton = "Skeleton Esp", HeadDot = "Head Dot", LookDir = "Look Direction",
 			Tracers = "Tracers", Arrows = "Off-screen Arrows", Distance = "Distance Text",
-			Weapon = "Weapon Text", TeamColors = "Team Colors",
+			Weapon = "Weapon Text", Status = "Status Text", TeamColors = "Team Colors",
 		}
 		local feat = {}
 		for _, key in ipairs(FEATURES) do
@@ -433,12 +637,12 @@ return function(lib)
 		local tracerFrom = "Bottom"
 		local teamSource = "Custom"
 		local headStyle = "Outline"
-		local chamStyle = "Both"
+		local chamStyle = "Normal"
 		local chamWalls = "On"
 		local arrowSize = "Medium"
 		local arrowRadius = "Mid"
-		local fonts = {Name = "UI", HealthText = "UI", ArmorText = "UI", Distance = "UI", Weapon = "UI"}
-		local extra = {self = false, armFormat = "Number", lookLen = 6} -- Self ESP / Armor Text format / Look Direction length
+		local fonts = {Name = "UI", HealthText = "UI", ArmorText = "UI", Distance = "UI", Weapon = "UI", Status = "UI"}
+		local extra = {self = false, dead = false, armFormat = "Number", lookLen = 6} -- Self ESP / Armor Text format / Look Direction length
 
 		local function newSlot(c, a)
 			local hh, ss, vv = rgbToHsv(c)
@@ -456,6 +660,10 @@ return function(lib)
 			trc = newSlot(Color3.fromRGB(180, 180, 180)),
 			hpText = newSlot(Color3.fromRGB(255, 255, 255)),
 			armText = newSlot(Color3.fromRGB(255, 255, 255)),
+			stIdle = newSlot(Color3.fromRGB(200, 200, 205)),
+			stMove = newSlot(Color3.fromRGB(90, 210, 120)),
+			stJump = newSlot(Color3.fromRGB(90, 160, 255)),
+			stDead = newSlot(Color3.fromRGB(235, 70, 70)),
 			dist = newSlot(Color3.fromRGB(255, 255, 255)),
 			weapon = newSlot(Color3.fromRGB(255, 255, 255)),
 			hpFull = newSlot(Color3.fromRGB(60, 220, 90)),
@@ -497,7 +705,7 @@ return function(lib)
 		end
 
 		local function needsBounds()
-			return feat.BoxFill or feat.Name or feat.Health or feat.Armor or feat.HealthText or feat.ArmorText or feat.Distance or feat.Weapon
+			return feat.BoxFill or feat.Name or feat.Health or feat.Armor or feat.HealthText or feat.ArmorText or feat.Distance or feat.Weapon or feat.Status
 				or (feat.Box and style ~= "3D")
 		end
 
@@ -602,7 +810,7 @@ return function(lib)
 		-- ====================================================
 		-- Visuals page
 		-- ====================================================
-		local CARD1_H = 236
+		local CARD1_H = 281
 		local CARD_GAP = 10
 		local FEAT_H = #FEATURES * 45 - 1
 
@@ -755,17 +963,24 @@ return function(lib)
 		addRowLabel(visRow, "Visible check")
 		addSeparator(134)
 
-		local selfSwitch
+		local selfSwitch, deadSwitch
 		do
-			local selfRow = addRow(135, ROW_H)
-			addRowLabel(selfRow, "Self ESP")
+			local deadRow = addRow(135, ROW_H)
+			addRowLabel(deadRow, "Dead check")
 			addSeparator(179)
+			deadSwitch = makeSwitch(deadRow, function(isOn)
+				extra.dead = isOn
+			end, true)
+
+			local selfRow = addRow(180, ROW_H)
+			addRowLabel(selfRow, "Self ESP")
+			addSeparator(224)
 			selfSwitch = makeSwitch(selfRow, function(isOn)
 				extra.self = isOn
 			end, true)
 		end
 
-		local distRow = addRow(180, SLIDER_H)
+		local distRow = addRow(225, SLIDER_H)
 		addRowLabel(distRow, "Render distance", 6)
 
 		local masterSwitch = makeSwitch(masterRow, function(isOn)
@@ -868,6 +1083,7 @@ return function(lib)
 			teamSwitch.SetLocked(locked)
 			visSwitch.SetLocked(locked)
 			selfSwitch.SetLocked(locked)
+			deadSwitch.SetLocked(locked)
 			for _, key in ipairs(FEATURES) do
 				featSwitch[key].SetLocked(locked)
 			end
@@ -934,18 +1150,28 @@ return function(lib)
 			return f
 		end
 
-		local function makeChoice(parent, x, y, names, initial, onPick)
+		local function makeChoice(parent, x, y, names, initial, onPick, cols)
 			local row = Instance.new("Frame")
 			row.BackgroundTransparency = 1
 			row.Position = UDim2.fromOffset(x, y)
 			row.Size = UDim2.new(1, -(x + 14), 0, 26)
 			row.Parent = parent
 
-			local layout = Instance.new("UIListLayout")
-			layout.FillDirection = Enum.FillDirection.Horizontal
-			layout.Padding = UDim.new(0, 6)
-			layout.SortOrder = Enum.SortOrder.LayoutOrder
-			layout.Parent = row
+			if cols then
+				local rows = math.ceil(#names / cols)
+				row.Size = UDim2.new(1, -(x + 14), 0, rows * 26 + (rows - 1) * 4)
+				local grid = Instance.new("UIGridLayout")
+				grid.CellSize = UDim2.new(1 / cols, -6 * (cols - 1) / cols, 0, 26)
+				grid.CellPadding = UDim2.fromOffset(6, 4)
+				grid.SortOrder = Enum.SortOrder.LayoutOrder
+				grid.Parent = row
+			else
+				local layout = Instance.new("UIListLayout")
+				layout.FillDirection = Enum.FillDirection.Horizontal
+				layout.Padding = UDim.new(0, 6)
+				layout.SortOrder = Enum.SortOrder.LayoutOrder
+				layout.Parent = row
+			end
 
 			local n = #names
 			local buttons, strokes = {}, {}
@@ -987,7 +1213,12 @@ return function(lib)
 				btn.Text = name
 				btn.TextColor3 = TEXT_SOFT
 				btn.TextSize = 13
+				btn.TextScaled = true
 				btn.Parent = row
+				local fitText = Instance.new("UITextSizeConstraint")
+				fitText.MaxTextSize = 13
+				fitText.MinTextSize = 8
+				fitText.Parent = btn
 				addCorner(btn)
 				strokes[name] = addStroke(btn, FIELD_STROKE)
 				buttons[name] = btn
@@ -1282,7 +1513,7 @@ return function(lib)
 		-- option lists (kept OUTSIDE buildPanels because the API at the bottom uses them)
 		local OPT = {
 			styles = {"Full", "Corners", "3D"},
-			chamStyles = {"Fill", "Outline", "Both"},
+			chamStyles = CHAM_MODES,
 			nameSources = {"Display", "Username", "Both"},
 			hpFormats = {"Number", "Percent"},
 			thicknesses = {Thin = 1, Normal = 1.5, Thick = 2.5},
@@ -1375,21 +1606,21 @@ return function(lib)
 			fillPicker.Bind(slots.fill)
 			smallLabel(fillPanel, "COLOR", 226, 42)
 
-			-- ---------- Chams panel ----------
+			-- ---------- Chams panel (modes: Normal / Solid / Glow / Textured / Wireframe / Textured Wireframe) ----------
 			local CHAM_STOPS = {Fill = "chamFill", Outline = "chamOutline"}
-			local chamsPanel = newPanel("Chams", 214, "CHAMS")
-			local chamsPicker = makePicker(chamsPanel, true, 150, 226, 186, refreshDots)
+			local chamsPanel = newPanel("Chams", 298, "CHAMS")
+			local chamsPicker = makePicker(chamsPanel, true, 196, 226, 260, refreshDots)
 			chamsPicker.Bind(slots.chamFill)
-			smallLabel(chamsPanel, "STYLE", 226, 42)
+			smallLabel(chamsPanel, "MODE", 226, 42)
 			local chamStyleChoice = makeChoice(chamsPanel, 226, 60, CHAM_STYLES, chamStyle, function(name)
 				chamStyle = name
-			end)
-			smallLabel(chamsPanel, "THROUGH WALLS", 226, 90)
-			local chamWallsChoice = makeChoice(chamsPanel, 226, 108, {"On", "Off"}, chamWalls, function(name)
+			end, 2)
+			smallLabel(chamsPanel, "THROUGH WALLS", 226, 154)
+			local chamWallsChoice = makeChoice(chamsPanel, 226, 172, {"On", "Off"}, chamWalls, function(name)
 				chamWalls = name
 			end)
-			smallLabel(chamsPanel, "COLORS", 226, 138)
-			local chamStopChoice = makeChoice(chamsPanel, 226, 156, {"Fill", "Outline"}, "Fill", function(name)
+			smallLabel(chamsPanel, "COLORS (FILL = BODY, OUTLINE = OUTLINE / WIRES)", 226, 206)
+			local chamStopChoice = makeChoice(chamsPanel, 226, 224, {"Fill", "Outline"}, "Fill", function(name)
 				chamsPicker.Bind(slots[CHAM_STOPS[name]])
 			end)
 			for name, btn in pairs(chamStopChoice.buttons) do
@@ -1521,6 +1752,16 @@ return function(lib)
 			addFontChoice(weaponPanel, "Weapon", 42)
 			smallLabel(weaponPanel, "COLOR", 226, 94)
 
+			-- ---------- Status text panel ----------
+			local statusPanel = newPanel("Status", 180, "STATUS TEXT")
+			local statusPicker = makePicker(statusPanel, false, 122, 226, 142, noop)
+			statusPicker.Bind(slots.stIdle)
+			addFontChoice(statusPanel, "Status", 42)
+			smallLabel(statusPanel, "COLORS", 226, 90)
+			makeChoice(statusPanel, 226, 108, STATUS_LIST, "Idle", function(name)
+				statusPicker.Bind(slots[STATUS_KEY[name]])
+			end)
+
 			-- ---------- Team colors panel ----------
 			local TEAM_STOPS = {Ally = "ally", Enemy = "enemy"}
 			local teamPanel = newPanel("TeamColors", 180, "TEAM COLORS")
@@ -1541,7 +1782,7 @@ return function(lib)
 			return {
 				pickers = {boxPicker, fillPicker, chamsPicker, namePicker, healthPicker, armorPicker,
 					hpTextPicker, skelPicker, headPicker, lookPicker, trcPicker, arrowPicker,
-					distPicker, weaponPicker, teamPicker, armTextPicker},
+					distPicker, weaponPicker, teamPicker, armTextPicker, statusPicker},
 				choices = {
 					style = styleChoice, chamStyle = chamStyleChoice, chamWalls = chamWallsChoice,
 					source = sourceChoice, hpMode = hpModeChoice, hpFormat = hpFormatChoice,
@@ -2032,6 +2273,13 @@ return function(lib)
 				hidePreviewText("name")
 			end
 
+			if feat.Status and hasB then
+				local sn = STATUS_LIST[math.floor(os.clock() / 1.2) % #STATUS_LIST + 1]
+				showPreviewText("status", sn, bnd.maxX + PAD + 4, bnd.minY - PAD, 0, 0, colorOf(slots[STATUS_KEY[sn]]), 1, fonts.Status)
+			else
+				hidePreviewText("status")
+			end
+
 			local by = bnd.maxY + PAD + 2
 			if feat.Weapon and hasB then
 				showPreviewText("weapon", "Weapon", cx, by, 0.5, 0, colorFor(slots.weapon, nil), slots.weapon.a, fonts.Weapon)
@@ -2072,6 +2320,8 @@ return function(lib)
 			end
 		end
 
+		extra.cham = {folder = chamFolder}
+
 		local function setZ(obj, z)
 			pcall(function() obj.ZIndex = z end)
 		end
@@ -2111,14 +2361,6 @@ return function(lib)
 			return t
 		end
 
-		local function newCham()
-			local h = Instance.new("Highlight")
-			h.Name = "EspCham"
-			h.Enabled = false
-			h.Parent = chamFolder
-			return h
-		end
-
 		local function newRecord()
 			return {
 				box = {}, boxShown = 0,
@@ -2156,7 +2398,7 @@ return function(lib)
 			if rec.fill then kill(rec.fill) end
 			for _, t in pairs(rec.text) do kill(t) end
 			if rec.cham then
-				pcall(function() rec.cham:Destroy() end)
+				pcall(Chams.destroy, rec.cham)
 			end
 			records[player] = nil
 		end
@@ -2195,7 +2437,7 @@ return function(lib)
 				rec.arrowOn = false
 			end
 			if rec.cham then
-				rec.cham.Enabled = false
+				Chams.hide(rec.cham)
 			end
 			if rec.fill then rec.fill.Visible = false end
 			rec.fillOn = false
@@ -2300,7 +2542,10 @@ return function(lib)
 			local root = char and char:FindFirstChild("HumanoidRootPart")
 			local rec = records[player]
 
-			local pass = char ~= nil and hum ~= nil and root ~= nil and hum.Health > 0
+			local pass = char ~= nil and hum ~= nil and root ~= nil
+			if pass and extra.dead and hum.Health <= 0 then
+				pass = false -- Dead check: skip dead players
+			end
 			local dist = 0
 			if pass then
 				dist = (root.Position - camPos).Magnitude
@@ -2353,27 +2598,17 @@ return function(lib)
 				return
 			end
 
-			-- chams
+			-- chams (see the Chams module)
 			if feat.Chams then
-				local h = rec.cham
-				if not h or not h.Parent then
-					h = newCham()
-					rec.cham = h
-				end
-				if h.Adornee ~= char then
-					h.Adornee = char
-				end
-				local fillC, outlineC = chamColors(player)
-				local showFill = chamStyle ~= "Outline"
-				local showOutline = chamStyle ~= "Fill"
-				h.FillColor = fillC
-				h.FillTransparency = showFill and (1 - slots.chamFill.a * curFade) or 1
-				h.OutlineColor = outlineC
-				h.OutlineTransparency = showOutline and (1 - slots.chamOutline.a * curFade) or 1
-				h.DepthMode = (chamWalls == "On") and Enum.HighlightDepthMode.AlwaysOnTop or Enum.HighlightDepthMode.Occluded
-				h.Enabled = true
+				local cfg = extra.cham
+				cfg.fill, cfg.outline = chamColors(player)
+				cfg.mode = chamStyle
+				cfg.walls = chamWalls == "On"
+				cfg.fillA, cfg.outA = slots.chamFill.a, slots.chamOutline.a
+				cfg.fade = curFade
+				Chams.update(rec, char, cfg)
 			elseif rec.cham then
-				rec.cham.Enabled = false
+				Chams.hide(rec.cham)
 			end
 
 			local hasB = needsBounds() and computeBounds(char, project)
@@ -2545,6 +2780,16 @@ return function(lib)
 				hideText(rec, "name")
 			end
 
+			-- status text: top right, opposite side of the health bar
+			if feat.Status and hasB then
+				local sn = statusOf(hum, root)
+				local t = getText(rec, "status", sn, colorOf(slots[STATUS_KEY[sn]]), 1, fonts.Status)
+				local tw = textSize(t, sn)
+				showText(rec, "status", t, bnd.maxX + PAD + 4 + tw / 2, bnd.minY - PAD)
+			else
+				hideText(rec, "status")
+			end
+
 			-- weapon + distance under the player
 			local by = bnd.maxY + PAD + 2
 			local wStr = (feat.Weapon and hasB) and weaponName(char) or nil
@@ -2673,6 +2918,14 @@ return function(lib)
 			SetWeaponText = function(value) featSwitch.Weapon.Set(value) end,
 			SetTeamColors = function(value) featSwitch.TeamColors.Set(value) end,
 			SetSelfEsp = function(value) selfSwitch.Set(value) end,
+			SetDeadCheck = function(value) deadSwitch.Set(value) end,
+			SetStatusText = function(value) featSwitch.Status.Set(value) end,
+			SetStatusColors = function(idle, moving, jumping, dead)
+				if idle then setSlot(slots.stIdle, idle) end
+				if moving then setSlot(slots.stMove, moving) end
+				if jumping then setSlot(slots.stJump, jumping) end
+				if dead then setSlot(slots.stDead, dead) end
+			end,
 			SetArmorText = function(value) featSwitch.ArmorText.Set(value) end,
 			SetArmorTextFormat = function(name) -- "Number" / "Percent"
 				if indexOf(OPT.hpFormats, name) then
@@ -2701,7 +2954,12 @@ return function(lib)
 			end,
 
 			-- chams
-			SetChamsStyle = function(name)
+			SetChamsMode = function(name) -- "Normal" / "Solid" / "Glow" / "Textured" / "Wireframe" / "Textured Wireframe"
+				if indexOf(OPT.chamStyles, name) then
+					ui.choices.chamStyle.Set(name)
+				end
+			end,
+			SetChamsStyle = function(name) -- same as SetChamsMode
 				if indexOf(OPT.chamStyles, name) then
 					ui.choices.chamStyle.Set(name)
 				end
