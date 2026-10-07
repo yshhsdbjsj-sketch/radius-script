@@ -677,9 +677,8 @@ return function(lib)
 			style = "Full", nameSource = "Display", hpMode = "Gradient", hpFormat = "Number",
 			armFormat = "Number", skelThick = 1, tracerFrom = "Bottom", teamSource = "Custom",
 			headStyle = "Outline", chamStyle = "Normal", chamWalls = "On", arrowSize = "Medium",
-			arrowRadius = "Mid", lookLen = 6, self = false, dead = false,
+			arrowRadius = "Mid", lookLen = 6, self = false, dead = false, font = "UI",
 		}
-		local fonts = {Name = "UI", HealthText = "UI", ArmorText = "UI", Distance = "UI", Weapon = "UI", Status = "UI"}
 
 		local OPT = {
 			styles = {"Full", "Corners", "3D"},
@@ -715,7 +714,6 @@ return function(lib)
 			hpMid = newSlot(Color3.fromRGB(240, 210, 60)),
 			hpLow = newSlot(Color3.fromRGB(235, 60, 60)),
 			armor = newSlot(Color3.fromRGB(70, 140, 255)),
-			armorLow = newSlot(Color3.fromRGB(35, 60, 150)),
 			head = newSlot(Color3.fromRGB(255, 255, 255)),
 			look = newSlot(Color3.fromRGB(255, 255, 255)),
 			arrow = newSlot(Color3.fromRGB(255, 255, 255)),
@@ -1026,7 +1024,7 @@ return function(lib)
 		end
 
 		-- arrow button on the row + the dropdown area under it
-		local function addDropdown(it)
+		local function addDropdown(it, chevX, rowClick)
 			local drop = Instance.new("Frame")
 			drop.BackgroundColor3 = DROP_BG
 			drop.BorderSizePixel = 0
@@ -1035,9 +1033,23 @@ return function(lib)
 			drop.Parent = it.frame
 			it.drop = drop
 
+			if rowClick then
+				local rowBtn = Instance.new("TextButton")
+				rowBtn.BackgroundTransparency = 1
+				rowBtn.AutoButtonColor = false
+				rowBtn.Text = ""
+				rowBtn.Size = UDim2.fromScale(1, 1)
+				rowBtn.Parent = it.row
+				rowBtn.MouseButton1Click:Connect(function()
+					if master then
+						setOpen(it, not it.open)
+					end
+				end)
+			end
+
 			local btn = Instance.new("TextButton")
 			btn.AnchorPoint = Vector2.new(1, 0.5)
-			btn.Position = UDim2.new(1, -64, 0.5, 0)
+			btn.Position = UDim2.new(1, -(chevX or 64), 0.5, 0)
 			btn.Size = UDim2.fromOffset(24, 24)
 			btn.BackgroundTransparency = 1
 			btn.AutoButtonColor = false
@@ -1148,6 +1160,26 @@ return function(lib)
 			addDropdown(items.TeamColors)
 		end
 
+		-- one font for all the esp text, picked from a dropdown
+		local fontValue
+		do
+			local it = addItem(card1, ROW_H)
+			items.Font = it
+			addRowLabel(it.row, "Font")
+			fontValue = Instance.new("TextLabel")
+			fontValue.BackgroundTransparency = 1
+			fontValue.AnchorPoint = Vector2.new(1, 0.5)
+			fontValue.Position = UDim2.new(1, -44, 0.5, 0)
+			fontValue.Size = UDim2.fromOffset(80, 18)
+			fontValue.Font = Enum.Font.GothamMedium
+			fontValue.Text = opt.font
+			fontValue.TextColor3 = TEXT_SOFT
+			fontValue.TextSize = 13
+			fontValue.TextXAlignment = Enum.TextXAlignment.Right
+			fontValue.Parent = it.row
+			addDropdown(it, 12, true)
+		end
+
 		-- render distance slider row
 		local distValue, distTrack, distFill, distKnob
 		local function setDistance(value)
@@ -1218,7 +1250,9 @@ return function(lib)
 				feat[key] = on
 				setOpen(items[key], on)
 			end, true)
-			addDropdown(items[key])
+			if key ~= "Status" then
+				addDropdown(items[key])
+			end
 		end
 
 		-- ---------- locking ----------
@@ -1248,7 +1282,6 @@ return function(lib)
 		-- ====================================================
 		local function buildDrops()
 			local pickers, choices, dotList = {}, {}, {}
-			local fontChoices = {}
 
 			local function noop() end
 
@@ -1426,255 +1459,326 @@ return function(lib)
 				return set
 			end
 
-			-- saturation/value square + hue bar (+ alpha bar) + swatch + hex box, edits the bound slot
-			local function makePicker(parent, withAlpha, x0, y0, pickH, onChange)
-				local P = {slot = nil}
-				local hexFocused = false
-				local SVW = 140
+			-- ---------- shared color picker window ----------
+			-- every color row shows a small square; clicking it opens this one window bound to that color
+			local PW = 240
+			local PK = {slot = nil, owner = nil, alpha = false}
 
-				local svFrame = Instance.new("Frame")
-				svFrame.Position = UDim2.fromOffset(x0, y0)
-				svFrame.Size = UDim2.fromOffset(SVW, pickH)
-				svFrame.BackgroundColor3 = Color3.fromHSV(0, 1, 1)
-				svFrame.BorderSizePixel = 0
-				svFrame.Parent = parent
-				addCorner(svFrame, 4)
-				addStroke(svFrame, FIELD_STROKE)
+			local blocker = Instance.new("TextButton")
+			blocker.BackgroundTransparency = 1
+			blocker.AutoButtonColor = false
+			blocker.Text = ""
+			blocker.Size = UDim2.fromScale(1, 1)
+			blocker.ZIndex = 49
+			blocker.Visible = false
+			blocker.Parent = win.frame
 
-				local white = Instance.new("Frame")
-				white.Size = UDim2.fromScale(1, 1)
-				white.BackgroundColor3 = Color3.new(1, 1, 1)
-				white.BorderSizePixel = 0
-				white.Parent = svFrame
-				addCorner(white, 4)
-				local whiteGradient = Instance.new("UIGradient")
-				whiteGradient.Transparency = NumberSequence.new({
-					NumberSequenceKeypoint.new(0, 0),
-					NumberSequenceKeypoint.new(1, 1),
-				})
-				whiteGradient.Parent = white
+			local pop = Instance.new("Frame")
+			pop.Name = "EspColorPicker"
+			pop.BackgroundColor3 = Color3.fromRGB(22, 22, 25)
+			pop.BorderSizePixel = 0
+			pop.Active = true
+			pop.ZIndex = 50
+			pop.Visible = false
+			pop.Parent = win.frame
+			addCorner(pop, 6)
+			addStroke(pop, Color3.fromRGB(54, 54, 60))
 
-				local black = Instance.new("Frame")
-				black.Size = UDim2.fromScale(1, 1)
-				black.BackgroundColor3 = Color3.new(0, 0, 0)
-				black.BorderSizePixel = 0
-				black.Parent = svFrame
-				addCorner(black, 4)
-				local blackGradient = Instance.new("UIGradient")
-				blackGradient.Rotation = 90
-				blackGradient.Transparency = NumberSequence.new({
-					NumberSequenceKeypoint.new(0, 1),
-					NumberSequenceKeypoint.new(1, 0),
-				})
-				blackGradient.Parent = black
+			local function hit(parent)
+				local b = Instance.new("TextButton")
+				b.Size = UDim2.fromScale(1, 1)
+				b.BackgroundTransparency = 1
+				b.AutoButtonColor = false
+				b.Text = ""
+				b.ZIndex = 5
+				b.Parent = parent
+				return b
+			end
 
-				local svCursor = Instance.new("Frame")
-				svCursor.AnchorPoint = Vector2.new(0.5, 0.5)
-				svCursor.Size = UDim2.fromOffset(10, 10)
-				svCursor.BackgroundTransparency = 1
-				svCursor.BorderSizePixel = 0
-				svCursor.ZIndex = 4
-				svCursor.Parent = svFrame
-				addCorner(svCursor, 1000)
-				local svCursorStroke = addStroke(svCursor, Color3.new(1, 1, 1))
-				svCursorStroke.Thickness = 2
+			local function cursorBar(parent)
+				local c = Instance.new("Frame")
+				c.AnchorPoint = Vector2.new(0.5, 0.5)
+				c.Size = UDim2.fromOffset(6, 18)
+				c.BackgroundColor3 = Color3.new(1, 1, 1)
+				c.BorderSizePixel = 0
+				c.ZIndex = 4
+				c.Parent = parent
+				addCorner(c, 3)
+				addStroke(c, Color3.fromRGB(20, 20, 23))
+				return c
+			end
 
-				local svHit = Instance.new("TextButton")
-				svHit.Size = UDim2.fromScale(1, 1)
-				svHit.BackgroundTransparency = 1
-				svHit.AutoButtonColor = false
-				svHit.Text = ""
-				svHit.ZIndex = 5
-				svHit.Parent = svFrame
+			local sv = Instance.new("Frame")
+			sv.Position = UDim2.fromOffset(12, 12)
+			sv.Size = UDim2.fromOffset(PW - 24, 140)
+			sv.BackgroundColor3 = Color3.fromHSV(0, 1, 1)
+			sv.BorderSizePixel = 0
+			sv.Parent = pop
+			addCorner(sv, 4)
 
-				local hueFrame = Instance.new("Frame")
-				hueFrame.Position = UDim2.fromOffset(x0 + SVW + 8, y0)
-				hueFrame.Size = UDim2.fromOffset(14, pickH)
-				hueFrame.BackgroundColor3 = Color3.new(1, 1, 1)
-				hueFrame.BorderSizePixel = 0
-				hueFrame.Parent = parent
-				addCorner(hueFrame, 4)
-				addStroke(hueFrame, FIELD_STROKE)
+			local white = Instance.new("Frame")
+			white.Size = UDim2.fromScale(1, 1)
+			white.BackgroundColor3 = Color3.new(1, 1, 1)
+			white.BorderSizePixel = 0
+			white.Parent = sv
+			addCorner(white, 4)
+			local whiteGradient = Instance.new("UIGradient")
+			whiteGradient.Transparency = NumberSequence.new({
+				NumberSequenceKeypoint.new(0, 0),
+				NumberSequenceKeypoint.new(1, 1),
+			})
+			whiteGradient.Parent = white
 
-				local hueKeys = {}
-				for i = 0, 6 do
-					table.insert(hueKeys, ColorSequenceKeypoint.new(i / 6, Color3.fromHSV(i / 6 >= 1 and 0 or i / 6, 1, 1)))
+			local black = Instance.new("Frame")
+			black.Size = UDim2.fromScale(1, 1)
+			black.BackgroundColor3 = Color3.new(0, 0, 0)
+			black.BorderSizePixel = 0
+			black.Parent = sv
+			addCorner(black, 4)
+			local blackGradient = Instance.new("UIGradient")
+			blackGradient.Rotation = 90
+			blackGradient.Transparency = NumberSequence.new({
+				NumberSequenceKeypoint.new(0, 1),
+				NumberSequenceKeypoint.new(1, 0),
+			})
+			blackGradient.Parent = black
+
+			local svCursor = Instance.new("Frame")
+			svCursor.AnchorPoint = Vector2.new(0.5, 0.5)
+			svCursor.Size = UDim2.fromOffset(12, 12)
+			svCursor.BackgroundTransparency = 1
+			svCursor.BorderSizePixel = 0
+			svCursor.ZIndex = 4
+			svCursor.Parent = sv
+			addCorner(svCursor, 1000)
+			addStroke(svCursor, Color3.new(1, 1, 1)).Thickness = 2
+			local svHit = hit(sv)
+
+			local hueBar = Instance.new("Frame")
+			hueBar.Position = UDim2.fromOffset(12, 162)
+			hueBar.Size = UDim2.fromOffset(PW - 24, 12)
+			hueBar.BackgroundColor3 = Color3.new(1, 1, 1)
+			hueBar.BorderSizePixel = 0
+			hueBar.Parent = pop
+			addCorner(hueBar, 6)
+			local hueKeys = {}
+			for i = 0, 6 do
+				table.insert(hueKeys, ColorSequenceKeypoint.new(i / 6, Color3.fromHSV(i / 6 >= 1 and 0 or i / 6, 1, 1)))
+			end
+			local hueGradient = Instance.new("UIGradient")
+			hueGradient.Color = ColorSequence.new(hueKeys)
+			hueGradient.Parent = hueBar
+			local hueCursor = cursorBar(hueBar)
+			local hueHit = hit(hueBar)
+
+			local alphaBar = Instance.new("Frame")
+			alphaBar.Position = UDim2.fromOffset(12, 182)
+			alphaBar.Size = UDim2.fromOffset(PW - 24, 12)
+			alphaBar.BackgroundColor3 = Color3.fromRGB(58, 58, 64)
+			alphaBar.BorderSizePixel = 0
+			alphaBar.Parent = pop
+			addCorner(alphaBar, 6)
+			local alphaFill = Instance.new("Frame")
+			alphaFill.Size = UDim2.fromScale(1, 1)
+			alphaFill.BackgroundColor3 = Color3.new(1, 1, 1)
+			alphaFill.BorderSizePixel = 0
+			alphaFill.Parent = alphaBar
+			addCorner(alphaFill, 6)
+			local alphaGradient = Instance.new("UIGradient")
+			alphaGradient.Transparency = NumberSequence.new({
+				NumberSequenceKeypoint.new(0, 1),
+				NumberSequenceKeypoint.new(1, 0),
+			})
+			alphaGradient.Parent = alphaFill
+			local alphaCursor = cursorBar(alphaBar)
+			local alphaHit = hit(alphaBar)
+
+			local pSwatch = Instance.new("Frame")
+			pSwatch.Size = UDim2.fromOffset(26, 26)
+			pSwatch.BackgroundColor3 = Color3.new(1, 1, 1)
+			pSwatch.BorderSizePixel = 0
+			pSwatch.Parent = pop
+			addCorner(pSwatch, 6)
+			addStroke(pSwatch, FIELD_STROKE)
+
+			local function newBox(placeholder)
+				local b = Instance.new("TextBox")
+				b.BackgroundColor3 = Color3.fromRGB(28, 28, 32)
+				b.BorderSizePixel = 0
+				b.ClearTextOnFocus = false
+				b.Font = Enum.Font.GothamMedium
+				b.Text = ""
+				b.PlaceholderText = placeholder
+				b.PlaceholderColor3 = Color3.fromRGB(95, 95, 101)
+				b.TextColor3 = TEXT_MAIN
+				b.TextSize = 13
+				b.Size = UDim2.fromOffset(60, 26)
+				b.Parent = pop
+				addCorner(b, 6)
+				addStroke(b, FIELD_STROKE)
+				return b
+			end
+			local hexBox = newBox("#RRGGBB")
+			local alphaBox = newBox("100%")
+			local hexFocused, alphaFocused = false, false
+
+			local function popRefresh()
+				local sl = PK.slot
+				if not sl then
+					return
 				end
-				local hueGradient = Instance.new("UIGradient")
-				hueGradient.Rotation = 90
-				hueGradient.Color = ColorSequence.new(hueKeys)
-				hueGradient.Parent = hueFrame
-
-				local hueCursor = Instance.new("Frame")
-				hueCursor.AnchorPoint = Vector2.new(0.5, 0.5)
-				hueCursor.Size = UDim2.new(1, 6, 0, 4)
-				hueCursor.BackgroundColor3 = Color3.new(1, 1, 1)
-				hueCursor.BorderSizePixel = 0
-				hueCursor.ZIndex = 4
-				hueCursor.Parent = hueFrame
-				addCorner(hueCursor, 2)
-				addStroke(hueCursor, Color3.fromRGB(20, 20, 23))
-
-				local hueHit = Instance.new("TextButton")
-				hueHit.Size = UDim2.fromScale(1, 1)
-				hueHit.BackgroundTransparency = 1
-				hueHit.AutoButtonColor = false
-				hueHit.Text = ""
-				hueHit.ZIndex = 5
-				hueHit.Parent = hueFrame
-
-				local alphaFill, alphaCursor, alphaHit
-				if withAlpha then
-					local alphaFrame = Instance.new("Frame")
-					alphaFrame.Position = UDim2.fromOffset(x0 + SVW + 30, y0)
-					alphaFrame.Size = UDim2.fromOffset(14, pickH)
-					alphaFrame.BackgroundColor3 = Color3.fromRGB(52, 52, 58)
-					alphaFrame.BorderSizePixel = 0
-					alphaFrame.Parent = parent
-					addCorner(alphaFrame, 4)
-					addStroke(alphaFrame, FIELD_STROKE)
-
-					alphaFill = Instance.new("Frame")
-					alphaFill.Size = UDim2.fromScale(1, 1)
-					alphaFill.BackgroundColor3 = Color3.new(1, 1, 1)
-					alphaFill.BorderSizePixel = 0
-					alphaFill.Parent = alphaFrame
-					addCorner(alphaFill, 4)
-					local alphaGradient = Instance.new("UIGradient")
-					alphaGradient.Rotation = 90
-					alphaGradient.Transparency = NumberSequence.new({
-						NumberSequenceKeypoint.new(0, 0),
-						NumberSequenceKeypoint.new(1, 0.95),
-					})
-					alphaGradient.Parent = alphaFill
-
-					alphaCursor = Instance.new("Frame")
-					alphaCursor.AnchorPoint = Vector2.new(0.5, 0.5)
-					alphaCursor.Size = UDim2.new(1, 6, 0, 4)
-					alphaCursor.BackgroundColor3 = Color3.new(1, 1, 1)
-					alphaCursor.BorderSizePixel = 0
-					alphaCursor.ZIndex = 4
-					alphaCursor.Parent = alphaFrame
-					addCorner(alphaCursor, 2)
-					addStroke(alphaCursor, Color3.fromRGB(20, 20, 23))
-
-					alphaHit = Instance.new("TextButton")
-					alphaHit.Size = UDim2.fromScale(1, 1)
-					alphaHit.BackgroundTransparency = 1
-					alphaHit.AutoButtonColor = false
-					alphaHit.Text = ""
-					alphaHit.ZIndex = 5
-					alphaHit.Parent = alphaFrame
+				local c = colorOf(sl)
+				sv.BackgroundColor3 = Color3.fromHSV(sl.h, 1, 1)
+				svCursor.Position = UDim2.fromScale(sl.s, 1 - sl.v)
+				hueCursor.Position = UDim2.fromScale(sl.h, 0.5)
+				pSwatch.BackgroundColor3 = c
+				pSwatch.BackgroundTransparency = PK.alpha and (1 - sl.a) or 0
+				alphaFill.BackgroundColor3 = c
+				alphaCursor.Position = UDim2.fromScale(sl.a, 0.5)
+				if not hexFocused then
+					hexBox.Text = toHex(c)
 				end
+				if PK.alpha and not alphaFocused then
+					alphaBox.Text = math.floor(sl.a * 100 + 0.5) .. "%"
+				end
+			end
 
-				local rowY = y0 + pickH + 8
-				local swatch = Instance.new("Frame")
-				swatch.Position = UDim2.fromOffset(x0, rowY)
-				swatch.Size = UDim2.fromOffset(26, 26)
-				swatch.BackgroundColor3 = Color3.new(1, 1, 1)
-				swatch.BorderSizePixel = 0
-				swatch.Parent = parent
-				addCorner(swatch)
-				addStroke(swatch, FIELD_STROKE)
+			local function changed()
+				popRefresh()
+				if PK.owner then
+					PK.owner.Refresh()
+				end
+				refreshDots()
+			end
 
-				local hexBox = Instance.new("TextBox")
-				hexBox.Position = UDim2.fromOffset(x0 + 34, rowY)
-				hexBox.Size = UDim2.new(1, -(x0 + 34 + 14), 0, 26)
-				hexBox.BackgroundColor3 = Color3.fromRGB(28, 28, 32)
-				hexBox.BorderSizePixel = 0
-				hexBox.ClearTextOnFocus = false
-				hexBox.Font = Enum.Font.GothamMedium
-				hexBox.Text = ""
-				hexBox.PlaceholderText = "#RRGGBB"
-				hexBox.PlaceholderColor3 = Color3.fromRGB(95, 95, 101)
-				hexBox.TextColor3 = TEXT_MAIN
-				hexBox.TextSize = 13
-				hexBox.TextXAlignment = Enum.TextXAlignment.Left
-				hexBox.Parent = parent
-				addCorner(hexBox)
-				local hexStroke = addStroke(hexBox, FIELD_STROKE)
-				local hexPad = Instance.new("UIPadding")
-				hexPad.PaddingLeft = UDim.new(0, 10)
-				hexPad.Parent = hexBox
+			local function closePicker()
+				pop.Visible = false
+				blocker.Visible = false
+				PK.owner, PK.slot = nil, nil
+			end
+			blocker.MouseButton1Click:Connect(closePicker)
 
-				function P.Refresh()
-					local sl = P.slot
+			local function openPicker(owner, slot, withAlpha, anchor)
+				PK.owner, PK.slot, PK.alpha = owner, slot, withAlpha
+				alphaBar.Visible = withAlpha
+				alphaBox.Visible = withAlpha
+				local rowY = withAlpha and 206 or 186
+				pSwatch.Position = UDim2.fromOffset(12, rowY)
+				hexBox.Position = UDim2.fromOffset(46, rowY)
+				hexBox.Size = UDim2.fromOffset(PW - 46 - 12 - (withAlpha and 68 or 0), 26)
+				alphaBox.Position = UDim2.fromOffset(PW - 12 - 60, rowY)
+				local h = rowY + 26 + 12
+				pop.Size = UDim2.fromOffset(PW, h)
+
+				local fp, fs = win.frame.AbsolutePosition, win.frame.AbsoluteSize
+				local ap, as = anchor.AbsolutePosition, anchor.AbsoluteSize
+				local x = math.clamp(ap.X - fp.X + as.X - PW, 6, math.max(6, fs.X - PW - 6))
+				local y = ap.Y - fp.Y + as.Y + 6
+				if fp.Y + y + h > win.gui.AbsoluteSize.Y - 6 then
+					y = ap.Y - fp.Y - h - 6
+				end
+				pop.Position = UDim2.fromOffset(x, y)
+				pop.Visible = true
+				blocker.Visible = true
+				popRefresh()
+			end
+
+			hexBox.Focused:Connect(function() hexFocused = true end)
+			hexBox.FocusLost:Connect(function()
+				hexFocused = false
+				local r, g, b = hexBox.Text:match("^#?(%x%x)(%x%x)(%x%x)$")
+				if r and PK.slot then
+					local hh, ss, vv = rgbToHsv(Color3.fromRGB(tonumber(r, 16), tonumber(g, 16), tonumber(b, 16)))
+					PK.slot.h, PK.slot.s, PK.slot.v = math.min(hh, 0.999), ss, vv
+				end
+				changed()
+			end)
+			alphaBox.Focused:Connect(function() alphaFocused = true end)
+			alphaBox.FocusLost:Connect(function()
+				alphaFocused = false
+				local n = tonumber(alphaBox.Text:match("%d+%.?%d*"))
+				if n and PK.slot then
+					PK.slot.a = math.clamp(n / 100, 0, 1)
+				end
+				changed()
+			end)
+
+			bindDrag(svHit, function(m)
+				if not PK.slot then
+					return
+				end
+				local ap, as = svHit.AbsolutePosition, svHit.AbsoluteSize
+				PK.slot.s = math.clamp((m.X - ap.X) / as.X, 0, 1)
+				PK.slot.v = 1 - math.clamp((m.Y - ap.Y) / as.Y, 0, 1)
+				changed()
+			end)
+			bindDrag(hueHit, function(m)
+				if not PK.slot then
+					return
+				end
+				local ap, as = hueHit.AbsolutePosition, hueHit.AbsoluteSize
+				PK.slot.h = math.clamp((m.X - ap.X) / as.X, 0, 0.999)
+				changed()
+			end)
+			bindDrag(alphaHit, function(m)
+				if not PK.slot then
+					return
+				end
+				local ap, as = alphaHit.AbsolutePosition, alphaHit.AbsoluteSize
+				PK.slot.a = math.clamp((m.X - ap.X) / as.X, 0, 1)
+				changed()
+			end)
+
+			-- a row in a dropdown: label on the left, color square on the right
+			local function makeSwatch(parent, y, withAlpha, labelText, item)
+				local S = {slot = nil, item = item}
+				smallLabel(parent, labelText, 14, y + 6)
+
+				local btn = Instance.new("TextButton")
+				btn.AnchorPoint = Vector2.new(1, 0)
+				btn.Position = UDim2.new(1, -14, 0, y)
+				btn.Size = UDim2.fromOffset(26, 26)
+				btn.AutoButtonColor = false
+				btn.Text = ""
+				btn.BorderSizePixel = 0
+				btn.Parent = parent
+				addCorner(btn, 6)
+				addStroke(btn, Color3.fromRGB(70, 70, 76))
+
+				local hexLabel = Instance.new("TextLabel")
+				hexLabel.BackgroundTransparency = 1
+				hexLabel.AnchorPoint = Vector2.new(1, 0)
+				hexLabel.Position = UDim2.new(1, -48, 0, y + 6)
+				hexLabel.Size = UDim2.fromOffset(90, 14)
+				hexLabel.Font = Enum.Font.GothamMedium
+				hexLabel.TextColor3 = TEXT_SOFT
+				hexLabel.TextSize = 12
+				hexLabel.TextXAlignment = Enum.TextXAlignment.Right
+				hexLabel.Parent = parent
+
+				function S.Refresh()
+					local sl = S.slot
 					if not sl then
 						return
 					end
-					local c = colorOf(sl)
-					svFrame.BackgroundColor3 = Color3.fromHSV(sl.h, 1, 1)
-					svCursor.Position = UDim2.fromScale(sl.s, 1 - sl.v)
-					hueCursor.Position = UDim2.fromScale(0.5, sl.h)
-					swatch.BackgroundColor3 = c
-					swatch.BackgroundTransparency = withAlpha and (1 - sl.a) or 0
-					if alphaFill then
-						alphaFill.BackgroundColor3 = c
-						alphaCursor.Position = UDim2.fromScale(0.5, 1 - sl.a)
-					end
-					if not hexFocused then
-						hexBox.Text = toHex(c)
+					btn.BackgroundColor3 = colorOf(sl)
+					btn.BackgroundTransparency = withAlpha and (1 - sl.a) or 0
+					hexLabel.Text = toHex(colorOf(sl))
+				end
+				function S.Bind(slot)
+					S.slot = slot
+					S.Refresh()
+					if PK.owner == S then
+						PK.slot = slot
+						popRefresh()
 					end
 				end
-
-				function P.Changed()
-					P.Refresh()
-					onChange()
-				end
-
-				function P.Bind(slot)
-					P.slot = slot
-					P.Refresh()
-				end
-
-				hexBox.Focused:Connect(function()
-					hexFocused = true
-					TweenService:Create(hexStroke, fadeInfo, {Color = Color3.fromRGB(95, 95, 104)}):Play()
-				end)
-				hexBox.FocusLost:Connect(function()
-					hexFocused = false
-					TweenService:Create(hexStroke, fadeInfo, {Color = FIELD_STROKE}):Play()
-					local r, g, b = hexBox.Text:match("^#?(%x%x)(%x%x)(%x%x)$")
-					if r and P.slot then
-						local hh, ss, vv = rgbToHsv(Color3.fromRGB(tonumber(r, 16), tonumber(g, 16), tonumber(b, 16)))
-						P.slot.h, P.slot.s, P.slot.v = math.min(hh, 0.999), ss, vv
-						onChange()
-					end
-					P.Refresh()
-					if P.slot then
-						hexBox.Text = toHex(colorOf(P.slot))
+				btn.MouseButton1Click:Connect(function()
+					if master and S.slot then
+						openPicker(S, S.slot, withAlpha, btn)
 					end
 				end)
-
-				bindDrag(svHit, function(m)
-					if not P.slot then
-						return
-					end
-					local ap, as = svHit.AbsolutePosition, svHit.AbsoluteSize
-					P.slot.s = math.clamp((m.X - ap.X) / as.X, 0, 1)
-					P.slot.v = 1 - math.clamp((m.Y - ap.Y) / as.Y, 0, 1)
-					P.Changed()
-				end)
-				bindDrag(hueHit, function(m)
-					if not P.slot then
-						return
-					end
-					local ap, as = hueHit.AbsolutePosition, hueHit.AbsoluteSize
-					P.slot.h = math.clamp((m.Y - ap.Y) / as.Y, 0, 0.999)
-					P.Changed()
-				end)
-				if alphaHit then
-					bindDrag(alphaHit, function(m)
-						if not P.slot then
-							return
-						end
-						local ap, as = alphaHit.AbsolutePosition, alphaHit.AbsoluteSize
-						P.slot.a = 1 - math.clamp((m.Y - ap.Y) / as.Y, 0, 1)
-						P.Changed()
-					end)
-				end
-
-				return P
+				return S
 			end
 
 			-- ---------- section helpers: stack things top to bottom inside a dropdown ----------
@@ -1690,37 +1794,29 @@ return function(lib)
 				return c
 			end
 
-			local function secPicker(sec, withAlpha, slot)
-				local P = makePicker(sec.f, withAlpha, 14, sec.y, 96, refreshDots)
-				P.Bind(slot)
-				table.insert(pickers, P)
-				sec.y = sec.y + 96 + 8 + 26 + 12
-				return P
+			-- one color: label + square
+			local function secColor(sec, slot, withAlpha)
+				local S = makeSwatch(sec.f, sec.y, withAlpha ~= false, "Color", sec.item)
+				S.Bind(slot)
+				table.insert(pickers, S)
+				sec.y = sec.y + 38
 			end
 
-			-- a label, buttons to pick which color you edit (with a dot showing it), and one picker
-			local function secColors(sec, label, stops, order, withAlpha)
-				secLabel(sec, label)
-				local P
+			-- several colors: buttons pick which one the square edits
+			local function secColors(sec, stops, order, withAlpha, noDots)
+				local S
 				local c = secChoice(sec, order, order[1], function(name)
-					P.Bind(slots[stops[name]])
+					S.Bind(slots[stops[name]])
 				end)
-				for name, btn in pairs(c.buttons) do
-					addDot(btn, stops[name])
+				if not noDots then
+					for name, btn in pairs(c.buttons) do
+						addDot(btn, stops[name])
+					end
 				end
-				P = secPicker(sec, withAlpha, slots[stops[order[1]]])
-			end
-
-			local function secFont(sec, key)
-				secLabel(sec, "Font")
-				fontChoices[key] = secChoice(sec, OPT.fonts, fonts[key], function(name)
-					fonts[key] = name
-				end)
-			end
-
-			local function secColor(sec, slot)
-				secLabel(sec, "Color")
-				secPicker(sec, true, slot)
+				S = makeSwatch(sec.f, sec.y, withAlpha, "Color", sec.item)
+				S.Bind(slots[stops[order[1]]])
+				table.insert(pickers, S)
+				sec.y = sec.y + 38
 			end
 
 			local build = {}
@@ -1730,6 +1826,12 @@ return function(lib)
 				choices.style = secChoice(sec, OPT.styles, opt.style, function(n) opt.style = n end)
 				secColor(sec, slots.box)
 			end
+			build.Font = function(sec)
+				choices.font = secChoice(sec, OPT.fonts, opt.font, function(n)
+					opt.font = n
+					fontValue.Text = n
+				end, 2)
+			end
 			build.BoxFill = function(sec)
 				secColor(sec, slots.fill)
 			end
@@ -1738,32 +1840,29 @@ return function(lib)
 				choices.chamStyle = secChoice(sec, CHAM_MODES, opt.chamStyle, function(n) opt.chamStyle = n end, 2)
 				secLabel(sec, "Through walls")
 				choices.chamWalls = secChoice(sec, {"On", "Off"}, opt.chamWalls, function(n) opt.chamWalls = n end)
-				secColors(sec, "Color", {Fill = "chamFill", Outline = "chamOutline"}, {"Fill", "Outline"}, true)
+				secColors(sec, {Fill = "chamFill", Outline = "chamOutline"}, {"Fill", "Outline"}, true)
 			end
 			build.Name = function(sec)
 				secLabel(sec, "Show")
 				choices.source = secChoice(sec, OPT.nameSources, opt.nameSource, function(n) opt.nameSource = n end)
-				secFont(sec, "Name")
 				secColor(sec, slots.name)
 			end
 			build.Health = function(sec)
 				secLabel(sec, "Mode")
 				choices.hpMode = secChoice(sec, {"Solid", "Gradient"}, opt.hpMode, function(n) opt.hpMode = n end)
-				secColors(sec, "Colors", {Full = "hpFull", Mid = "hpMid", Low = "hpLow"}, {"Full", "Mid", "Low"}, false)
+				secColors(sec, {Full = "hpFull", Mid = "hpMid", Low = "hpLow"}, {"Full", "Mid", "Low"}, false)
 			end
 			build.Armor = function(sec)
-				secColors(sec, "Colors", {Full = "armor", Low = "armorLow"}, {"Full", "Low"}, false)
+				secColor(sec, slots.armor, false)
 			end
 			build.ArmorText = function(sec)
 				secLabel(sec, "Format")
 				choices.armFormat = secChoice(sec, OPT.formats, opt.armFormat, function(n) opt.armFormat = n end)
-				secFont(sec, "ArmorText")
 				secColor(sec, slots.armText)
 			end
 			build.HealthText = function(sec)
 				secLabel(sec, "Format")
 				choices.hpFormat = secChoice(sec, OPT.formats, opt.hpFormat, function(n) opt.hpFormat = n end)
-				secFont(sec, "HealthText")
 				secColor(sec, slots.hpText)
 			end
 			build.Skeleton = function(sec)
@@ -1800,25 +1899,20 @@ return function(lib)
 				secColor(sec, slots.arrow)
 			end
 			build.Distance = function(sec)
-				secFont(sec, "Distance")
 				secColor(sec, slots.dist)
 			end
 			build.Weapon = function(sec)
-				secFont(sec, "Weapon")
 				secColor(sec, slots.weapon)
-			end
-			build.Status = function(sec)
-				secFont(sec, "Status")
 			end
 			build.TeamColors = function(sec)
 				secLabel(sec, "Source")
 				choices.teamSource = secChoice(sec, {"Custom", "Roblox"}, opt.teamSource, function(n) opt.teamSource = n end)
-				secColors(sec, "Colors", {Ally = "ally", Enemy = "enemy"}, {"Ally", "Enemy"}, false)
+				secColors(sec, {Ally = "ally", Enemy = "enemy"}, {"Ally", "Enemy"}, false, true)
 			end
 
 			for key, fn in pairs(build) do
 				local it = items[key]
-				local sec = {f = it.drop, y = 10}
+				local sec = {f = it.drop, y = 10, item = it}
 				fn(sec)
 				it.dropH = sec.y
 				it.drop.Size = UDim2.new(1, 0, 0, sec.y)
@@ -1828,12 +1922,25 @@ return function(lib)
 			return {
 				pickers = pickers,
 				choices = choices,
-				fontChoices = fontChoices,
 				refresh = function()
 					for _, p in ipairs(pickers) do
 						p.Refresh()
 					end
+					popRefresh()
 					refreshDots()
+				end,
+				-- close the color window when its dropdown closes / the tab changes / the menu locks
+				update = function()
+					if pop.Visible then
+						local o = PK.owner
+						if not (master and page.Visible and o and o.item and o.item.open) then
+							closePicker()
+						end
+					end
+				end,
+				destroy = function()
+					pop:Destroy()
+					blocker:Destroy()
 				end,
 			}
 		end
@@ -1869,7 +1976,7 @@ return function(lib)
 		end
 
 		local function armorColor(t)
-			return colorOf(slots.armorLow):Lerp(colorOf(slots.armor), t)
+			return colorOf(slots.armor)
 		end
 
 		local hpRects, armRects = {}, {}
@@ -1906,7 +2013,7 @@ return function(lib)
 			armBg[1], armBg[2], armBg[3], armBg[4] = x - 1, top - 1, HP_W + 2, H + 2
 			armInfo.x = x - 1
 			armInfo.y = bottom - H * math.max(frac, 0)
-			return fillBar(armRects, x, bottom, H, HP_W, frac, armorColor, true)
+			return fillBar(armRects, x, bottom, H, HP_W, frac, armorColor, false)
 		end
 
 		local function tracerOrigin(w, h, mouse)
@@ -2193,7 +2300,7 @@ return function(lib)
 					local str = (opt.hpFormat == "Percent") and (math.floor(frac * 100 + 0.5) .. "%") or tostring(math.floor(frac * 100 + 0.5))
 					hpTextW = #str * 6.5
 					local edge = armBarOn and armInfo.x or hpInfo.x
-					showPreviewText("hpText", str, edge - 3, hpInfo.y, 1, 0.5, colorOf(slots.hpText), slots.hpText.a, fonts.HealthText)
+					showPreviewText("hpText", str, edge - 3, hpInfo.y, 1, 0.5, colorOf(slots.hpText), slots.hpText.a, opt.font)
 				else
 					hidePreviewText("hpText")
 				end
@@ -2205,7 +2312,7 @@ return function(lib)
 			if feat.ArmorText and hasB then
 				local str = (opt.armFormat == "Percent") and (math.floor(armFrac * 100 + 0.5) .. "%") or tostring(math.floor(armFrac * ARMOR_MAX + 0.5))
 				local ax = armInfo.x - 3 - ((hpTextW > 0) and (hpTextW + 4) or 0)
-				showPreviewText("armText", str, ax, armInfo.y, 1, 0.5, colorOf(slots.armText), slots.armText.a, fonts.ArmorText)
+				showPreviewText("armText", str, ax, armInfo.y, 1, 0.5, colorOf(slots.armText), slots.armText.a, opt.font)
 			else
 				hidePreviewText("armText")
 			end
@@ -2215,7 +2322,7 @@ return function(lib)
 				if distanceOnName() then
 					str = str .. " " .. distanceText(25)
 				end
-				showPreviewText("name", str, cx, bnd.minY - PAD - 2, 0.5, 1, colorFor(slots.name, nil), slots.name.a, fonts.Name)
+				showPreviewText("name", str, cx, bnd.minY - PAD - 2, 0.5, 1, colorFor(slots.name, nil), slots.name.a, opt.font)
 			else
 				hidePreviewText("name")
 			end
@@ -2223,20 +2330,20 @@ return function(lib)
 			-- status: top right, cycles through the four words
 			if feat.Status and hasB then
 				local word, a = stepStatus(prevStatus, STATUS_LIST[math.floor(os.clock() / 1.6) % #STATUS_LIST + 1], frameDt)
-				showPreviewText("status", word, bnd.maxX + PAD + 4, bnd.minY - PAD, 0, 0, STATUS_COLOR, a, fonts.Status)
+				showPreviewText("status", word, bnd.maxX + PAD + 4, bnd.minY - PAD, 0, 0, STATUS_COLOR, a, opt.font)
 			else
 				hidePreviewText("status")
 			end
 
 			local by = bnd.maxY + PAD + 2
 			if feat.Weapon and hasB then
-				showPreviewText("weapon", "Weapon", cx, by, 0.5, 0, colorFor(slots.weapon, nil), slots.weapon.a, fonts.Weapon)
+				showPreviewText("weapon", "Weapon", cx, by, 0.5, 0, colorFor(slots.weapon, nil), slots.weapon.a, opt.font)
 				by = by + LINE_H
 			else
 				hidePreviewText("weapon")
 			end
 			if feat.Distance and not distanceOnName() and hasB then
-				showPreviewText("dist", distanceText(25), cx, by, 0.5, 0, colorFor(slots.dist, nil), slots.dist.a, fonts.Distance)
+				showPreviewText("dist", distanceText(25), cx, by, 0.5, 0, colorFor(slots.dist, nil), slots.dist.a, opt.font)
 			else
 				hidePreviewText("dist")
 			end
@@ -2677,7 +2784,7 @@ return function(lib)
 				end
 				if feat.HealthText then
 					local str = (opt.hpFormat == "Percent") and (math.floor(frac * 100 + 0.5) .. "%") or tostring(math.floor(rec.hpVal + 0.5))
-					local t = getText(rec, "hpText", str, colorOf(slots.hpText), slots.hpText.a, fonts.HealthText)
+					local t = getText(rec, "hpText", str, colorOf(slots.hpText), slots.hpText.a, opt.font)
 					local tw, th = textSize(t, str)
 					hpTextW = tw
 					local edge = armBarOn and armInfo.x or hpInfo.x
@@ -2695,7 +2802,7 @@ return function(lib)
 			-- armor text: left of the armor bar, further left when the health text is on too
 			if armHas and feat.ArmorText then
 				local str = (opt.armFormat == "Percent") and (math.floor(armFrac * 100 + 0.5) .. "%") or tostring(math.floor(rec.armVal + 0.5))
-				local t = getText(rec, "armText", str, colorOf(slots.armText), slots.armText.a, fonts.ArmorText)
+				local t = getText(rec, "armText", str, colorOf(slots.armText), slots.armText.a, opt.font)
 				local tw, th = textSize(t, str)
 				local ty = math.clamp(armInfo.y - th / 2, armBg[2], math.max(armBg[2], armBg[2] + armBg[4] - th))
 				showText(rec, "armText", t, armInfo.x - 3 - ((hpTextW > 0) and (hpTextW + 4) or 0) - tw / 2, ty)
@@ -2709,7 +2816,7 @@ return function(lib)
 				if distanceOnName() then
 					str = str .. " " .. distanceText(dist)
 				end
-				local t = getText(rec, "name", str, colorFor(slots.name, player), slots.name.a, fonts.Name)
+				local t = getText(rec, "name", str, colorFor(slots.name, player), slots.name.a, opt.font)
 				showText(rec, "name", t, cx, bnd.minY - PAD - 16)
 			else
 				hideText(rec, "name")
@@ -2718,7 +2825,7 @@ return function(lib)
 			-- status: top right, opposite side of the health bar, fades between words
 			if feat.Status and hasB then
 				local word, a = stepStatus(rec.status, statusOf(hum, root), frameDt)
-				local t = getText(rec, "status", word, STATUS_COLOR, a, fonts.Status)
+				local t = getText(rec, "status", word, STATUS_COLOR, a, opt.font)
 				local tw = textSize(t, word)
 				showText(rec, "status", t, bnd.maxX + PAD + 4 + tw / 2, bnd.minY - PAD)
 			else
@@ -2729,14 +2836,14 @@ return function(lib)
 			local by = bnd.maxY + PAD + 2
 			local wStr = (feat.Weapon and hasB) and weaponName(char) or nil
 			if wStr then
-				local t = getText(rec, "weapon", wStr, colorFor(slots.weapon, player), slots.weapon.a, fonts.Weapon)
+				local t = getText(rec, "weapon", wStr, colorFor(slots.weapon, player), slots.weapon.a, opt.font)
 				showText(rec, "weapon", t, cx, by)
 				by = by + LINE_H
 			else
 				hideText(rec, "weapon")
 			end
 			if feat.Distance and not distanceOnName() and hasB then
-				local t = getText(rec, "dist", distanceText(dist), colorFor(slots.dist, player), slots.dist.a, fonts.Distance)
+				local t = getText(rec, "dist", distanceText(dist), colorFor(slots.dist, player), slots.dist.a, opt.font)
 				showText(rec, "dist", t, cx, by)
 			else
 				hideText(rec, "dist")
@@ -2780,6 +2887,7 @@ return function(lib)
 			frameDt = dt
 			refreshLocks()
 			animateItems(dt)
+			ui.update()
 			updatePreview()
 			updateEsp()
 		end)
@@ -2806,6 +2914,7 @@ return function(lib)
 				prevDot:Destroy()
 			end
 			chamFolder:Destroy()
+			ui.destroy()
 			scroll:Destroy()
 		end
 		win.onClose(destroy)
@@ -2904,12 +3013,7 @@ return function(lib)
 				setSlot(slots.hpMid, mid)
 				setSlot(slots.hpLow, low)
 			end,
-			SetArmorColor = function(full, low)
-				setSlot(slots.armor, full)
-				if low then
-					setSlot(slots.armorLow, low)
-				end
-			end,
+			SetArmorColor = function(c) setSlot(slots.armor, c) end,
 			SetArmorTextFormat = function(name) pick("armFormat", OPT.formats, name) end,
 			SetArmorTextColor = function(c) setSlot(slots.armText, c) end,
 			SetHealthTextFormat = function(name) pick("hpFormat", OPT.formats, name) end,
@@ -2940,12 +3044,7 @@ return function(lib)
 			SetDistanceColor = function(c) setSlot(slots.dist, c) end,
 			SetWeaponColor = function(c) setSlot(slots.weapon, c) end,
 
-			-- fonts: feature = "Name" / "HealthText" / "ArmorText" / "Distance" / "Weapon" / "Status"
-			SetFont = function(feature, name)
-				if ui.fontChoices[feature] and indexOf(OPT.fonts, name) then
-					ui.fontChoices[feature].Set(name)
-				end
-			end,
+			SetFont = function(a, b) pick("font", OPT.fonts, b or a) end, -- "UI" / "System" / "Plex" / "Mono"
 
 			-- team colors
 			SetTeamColorSource = function(name) pick("teamSource", {"Custom", "Roblox"}, name) end,
