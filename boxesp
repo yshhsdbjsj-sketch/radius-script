@@ -709,6 +709,19 @@ return function(lib)
 		return n
 	end
 
+	-- color / opacity / thickness of a trail piece at age t (0 = head, 1 = tail)
+	local function trailStyle(t, c1, a1, c2, a2, gradient, fade, width, taper)
+		local c, a = c1, a1
+		if gradient then
+			c = c1:Lerp(c2, t)
+			a = a1 + (a2 - a1) * t
+		end
+		if fade then
+			a = a * math.clamp(1 - t, 0, 1)
+		end
+		return c, a, taper and width * (0.3 + 0.7 * (1 - t)) or width
+	end
+
 	-- turns tmpPos / tmpAge into screen segments {x1, y1, x2, y2, color, opacity, thickness}
 	local function computeTrail(count, project, c1, a1, c2, a2, gradient, fade, width, taper)
 		for i = 1, count do
@@ -721,17 +734,7 @@ return function(lib)
 				local t = (tmpAge[i] + tmpAge[i + 1]) / 2
 				local s = trailSegs[n]
 				s[1], s[2], s[3], s[4] = trailPX[i], trailPY[i], trailPX[i + 1], trailPY[i + 1]
-				if gradient then
-					s[5] = c1:Lerp(c2, t)
-					s[6] = a1 + (a2 - a1) * t
-				else
-					s[5] = c1
-					s[6] = a1
-				end
-				if fade then
-					s[6] = s[6] * math.clamp(1 - t, 0, 1)
-				end
-				s[7] = taper and width * (0.3 + 0.7 * (1 - t)) or width
+				s[5], s[6], s[7] = trailStyle(t, c1, a1, c2, a2, gradient, fade, width, taper)
 			end
 		end
 		return n
@@ -2336,6 +2339,75 @@ return function(lib)
 			return f
 		end
 
+		-- velocity line + trail in the preview are real 3D parts inside the viewport,
+		-- so the avatar covers whatever is behind it (flat overlay frames can't do that)
+		local folder3D
+		local velParts, trailParts = {}, {}
+
+		local function get3D(pool, i)
+			if not (folder3D and folder3D.Parent == previewViewport) then
+				folder3D = previewViewport:FindFirstChild("EspPreview3D")
+				if not folder3D then
+					folder3D = Instance.new("Folder")
+					folder3D.Name = "EspPreview3D"
+					folder3D.Parent = previewViewport
+				end
+			end
+			local part = pool[i]
+			if not part or not part.Parent then
+				part = Instance.new("Part")
+				part.Name = "EspSeg"
+				part.Anchored = true
+				part.CanCollide = false
+				part.CanQuery = false
+				part.CanTouch = false
+				part.CastShadow = false
+				part.Material = Enum.Material.Neon
+				part.Transparency = 1
+				part.Size = Vector3.new(0.05, 0.05, 0.05)
+				pool[i] = part
+			end
+			if part.Parent ~= folder3D then
+				part.Parent = folder3D
+			end
+			return part
+		end
+
+		local function hide3DPool(pool, from)
+			for i = from, #pool do
+				pool[i].Transparency = 1
+			end
+		end
+
+		local function hide3D()
+			hide3DPool(velParts, 1)
+			hide3DPool(trailParts, 1)
+		end
+
+		-- a thin box between two world points
+		local function place3D(pool, i, a, b, color, opacity, thick)
+			local part = get3D(pool, i)
+			local len = (b - a).Magnitude
+			if len < 0.001 then
+				part.Transparency = 1
+				return
+			end
+			part.Size = Vector3.new(thick, thick, len)
+			part.CFrame = CFrame.lookAt((a + b) / 2, b)
+			part.Color = color
+			part.Transparency = 1 - opacity
+		end
+
+		-- how many screen pixels one stud is worth near `at` (keeps the 3D lines the same width as the real ones)
+		local function pxPerStud(project, at)
+			local _, y1, v1 = project(at)
+			local _, y2, v2 = project(at + Vector3.new(0, 1, 0))
+			if v1 and v2 then
+				return math.max(math.abs(y2 - y1), 8)
+			end
+			return 40
+		end
+
 		local function hidePool(pool)
 			for _, f in ipairs(pool) do
 				f.Visible = false
@@ -2368,6 +2440,7 @@ return function(lib)
 			hidePool(prevVel)
 			hidePool(prevGhost)
 			hidePool(prevTrail)
+			hide3D()
 			hideDotPreview()
 			for key in pairs(prevTexts) do
 				hidePreviewText(key)
@@ -2673,45 +2746,68 @@ return function(lib)
 			end
 			drawLinePool(prevLook, n, lookSeg, colorFor(slots.look, nil, true), slots.look.a, 1.5)
 
-			-- velocity line: the avatar "runs" to the right, speed pulses
-			n = 0
-			if feat.VelLine then
-				local rootPart = model:FindFirstChild("HumanoidRootPart") or model:FindFirstChild("UpperTorso") or model:FindFirstChild("Torso")
-				if rootPart then
-					local rv = camera.CFrame.RightVector
-					local dir = Vector3.new(rv.X, 0, rv.Z)
-					if dir.Magnitude > 0.01 then
-						local speed = 22 + 10 * math.sin(now * 1.3)
-						n = computeVelocity(rootPart.Position, dir.Unit * speed, project, math.min(opt.velLen, 4.5), opt.velArrow == "On")
-					end
+			-- velocity line + movement trail, drawn as 3D parts that follow the way the avatar faces
+			local rootPart = model:FindFirstChild("HumanoidRootPart") or model:FindFirstChild("UpperTorso") or model:FindFirstChild("Torso")
+			local fwd = Vector3.new(0, 0, -1)
+			if rootPart then
+				local look = rootPart.CFrame.LookVector
+				local flat = Vector3.new(look.X, 0, look.Z)
+				if flat.Magnitude > 0.01 then
+					fwd = flat.Unit
 				end
 			end
-			drawLinePool(prevVel, n, velSeg, colorOf(slots.vel), slots.vel.a, 2)
+			local sideV = fwd:Cross(Vector3.new(0, 1, 0))
+			local pps = rootPart and pxPerStud(project, rootPart.Position) or 40
 
-			-- movement trail: a wavy path trailing off to the left of the avatar
-			n = 0
-			if feat.Trail then
-				local rootPart = model:FindFirstChild("HumanoidRootPart") or model:FindFirstChild("UpperTorso") or model:FindFirstChild("Torso")
-				if rootPart then
-					local rv = camera.CFrame.RightVector
-					local dir = Vector3.new(rv.X, 0, rv.Z)
-					if dir.Magnitude > 0.01 then
-						dir = dir.Unit
-						local foot = rootPart.Position - Vector3.new(0, 2.6, 0)
-						local cnt = 26
-						for i = 1, cnt do
-							local age = (i - 1) / (cnt - 1)
-							tmpPos[i] = foot - dir * (age * 4.2) + Vector3.new(0, math.sin(age * 7 - now * 4) * 0.22 * age, 0)
-							tmpAge[i] = age
-						end
-						local c1 = colorFor(slots.trail, nil, true)
-						local c2 = colorOverridden() and c1:Lerp(Color3.new(0, 0, 0), 0.55) or colorOf(slots.trail2)
-						n = computeTrail(cnt, project, c1, slots.trail.a, c2, slots.trail2.a,
-							opt.trailMode == "Gradient", opt.trailFade == "On", opt.trailWidth, opt.trailTaper == "On")
+			local vn = 0
+			if feat.VelLine and rootPart then
+				local speed = 22 + 10 * math.sin(now * 1.3)
+				local len = math.min(speed * 0.3, opt.velLen, 4)
+				local col, op, th = colorOf(slots.vel), slots.vel.a, 2 / pps
+				local from = rootPart.Position + fwd * 0.6
+				local to = from + fwd * len
+				vn = vn + 1
+				place3D(velParts, vn, from, to, col, op, th)
+				if opt.velArrow == "On" and len > 0.7 then
+					local hl = math.min(0.9, len * 0.45)
+					local back = -fwd
+					local ang = math.rad(28)
+					local up = Vector3.new(0, 1, 0)
+					local wings = {
+						CFrame.fromAxisAngle(up, ang):VectorToWorldSpace(back),
+						CFrame.fromAxisAngle(up, -ang):VectorToWorldSpace(back),
+						CFrame.fromAxisAngle(sideV, ang):VectorToWorldSpace(back),
+						CFrame.fromAxisAngle(sideV, -ang):VectorToWorldSpace(back),
+					}
+					for _, w in ipairs(wings) do
+						vn = vn + 1
+						place3D(velParts, vn, to, to + w * hl, col, op, th)
 					end
 				end
 			end
-			drawSegPool(prevTrail, n, trailSegs, 19)
+			hide3DPool(velParts, vn + 1)
+
+			local tn = 0
+			if feat.Trail and rootPart then
+				local foot = rootPart.Position - Vector3.new(0, 2.8, 0)
+				local c1 = colorFor(slots.trail, nil, true)
+				local c2 = colorOverridden() and c1:Lerp(Color3.new(0, 0, 0), 0.55) or colorOf(slots.trail2)
+				local gradient, fade, taper = opt.trailMode == "Gradient", opt.trailFade == "On", opt.trailTaper == "On"
+				local cnt = 26
+				local prevPt, prevAge
+				for i = 1, cnt do
+					local age = (i - 1) / (cnt - 1)
+					local pt = foot - fwd * (age * 4.2) + sideV * (math.sin(age * 7 - now * 4) * 0.18 * age)
+					if prevPt then
+						local col, op, th = trailStyle((prevAge + age) / 2, c1, slots.trail.a, c2, slots.trail2.a, gradient, fade, opt.trailWidth, taper)
+						tn = tn + 1
+						place3D(trailParts, tn, prevPt, pt, col, op, th / pps)
+					end
+					prevPt, prevAge = pt, age
+				end
+			end
+			hide3DPool(trailParts, tn + 1)
+
 
 			if feat.HeadDot then
 				local hx, hy, hr = computeHead(model, project)
@@ -3680,6 +3776,9 @@ return function(lib)
 				prevDot:Destroy()
 			end
 			chamFolder:Destroy()
+			if folder3D then
+				folder3D:Destroy()
+			end
 			ui.destroy()
 			scroll:Destroy()
 		end
