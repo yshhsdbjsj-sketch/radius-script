@@ -16,6 +16,7 @@
 --   Health ghost bar    trailing bar that shows the health you just lost
 --   Damage numbers      floating -25 / +10 text when a player takes damage / heals
 --   Velocity line       arrow that shows where a player is moving and how fast
+--   Movement trail      ribbon behind the player's path; Solid or Gradient, fade, taper, length
 
 return function(lib)
 	local Players = lib.Players
@@ -33,6 +34,7 @@ return function(lib)
 	local SEG_MAX = 12
 	local BONE_MAX = 14
 	local JOINT_MAX = 15
+	local TRAIL_MAX = 40
 	local HP_SEGS = 16
 	local FILL_SEGS = 14
 	local HP_W = 3
@@ -684,6 +686,57 @@ return function(lib)
 		return 3
 	end
 
+	-- movement trail: points are world positions, newest first, with an age of 0 (head) to 1 (tail)
+	local tmpPos, tmpAge = {}, {}
+	local trailSegs = {}
+	for i = 1, TRAIL_MAX do
+		trailSegs[i] = {0, 0, 0, 0, Color3.new(1, 1, 1), 1, 1}
+	end
+	local trailPX, trailPY, trailPV = {}, {}, {}
+
+	-- fills tmpPos / tmpAge from a list of {p = Vector3, t = time} (oldest first) plus the current spot
+	local function gatherTrail(tr, foot, now, life)
+		local n = 1
+		tmpPos[1], tmpAge[1] = foot, 0
+		for i = #tr, 1, -1 do
+			if n >= TRAIL_MAX then
+				break
+			end
+			n = n + 1
+			tmpPos[n] = tr[i].p
+			tmpAge[n] = math.clamp((now - tr[i].t) / life, 0, 1)
+		end
+		return n
+	end
+
+	-- turns tmpPos / tmpAge into screen segments {x1, y1, x2, y2, color, opacity, thickness}
+	local function computeTrail(count, project, c1, a1, c2, a2, gradient, fade, width, taper)
+		for i = 1, count do
+			trailPX[i], trailPY[i], trailPV[i] = project(tmpPos[i])
+		end
+		local n = 0
+		for i = 1, count - 1 do
+			if trailPV[i] and trailPV[i + 1] then
+				n = n + 1
+				local t = (tmpAge[i] + tmpAge[i + 1]) / 2
+				local s = trailSegs[n]
+				s[1], s[2], s[3], s[4] = trailPX[i], trailPY[i], trailPX[i + 1], trailPY[i + 1]
+				if gradient then
+					s[5] = c1:Lerp(c2, t)
+					s[6] = a1 + (a2 - a1) * t
+				else
+					s[5] = c1
+					s[6] = a1
+				end
+				if fade then
+					s[6] = s[6] * math.clamp(1 - t, 0, 1)
+				end
+				s[7] = taper and width * (0.3 + 0.7 * (1 - t)) or width
+			end
+		end
+		return n
+	end
+
 	local function computeArrow(camera, worldPos, vs, size, ringFrac)
 		local sp, onScreen = camera:WorldToViewportPoint(worldPos)
 		if onScreen and sp.X >= 0 and sp.X <= vs.X and sp.Y >= 0 and sp.Y <= vs.Y then
@@ -784,13 +837,13 @@ return function(lib)
 
 		local FEATURES = {
 			"Box", "BoxFill", "Chams", "Name", "Health", "Armor", "ArmorText", "HealthText", "Skeleton",
-			"HeadDot", "LookDir", "VelLine", "Tracers", "Arrows", "Distance", "Weapon", "Status", "Damage",
+			"HeadDot", "LookDir", "VelLine", "Trail", "Tracers", "Arrows", "Distance", "Weapon", "Status", "Damage",
 		}
 		local LABELS = {
 			Box = "Box Esp", BoxFill = "Box Fill", Chams = "Chams", Name = "Name Esp",
 			Health = "Health Bar", Armor = "Armor Bar", ArmorText = "Armor Text", HealthText = "Health Text",
 			Skeleton = "Skeleton Esp", HeadDot = "Head Dot", LookDir = "Look Direction",
-			VelLine = "Velocity Line", Tracers = "Tracers", Arrows = "Off-screen Arrows",
+			VelLine = "Velocity Line", Trail = "Movement Trail", Tracers = "Tracers", Arrows = "Off-screen Arrows",
 			Distance = "Distance Text", Weapon = "Weapon Text", Status = "Status Text",
 			Damage = "Damage Numbers",
 		}
@@ -806,6 +859,7 @@ return function(lib)
 			arrowRadius = "Mid", lookLen = 6, self = false, dead = false, font = "UI",
 			boxOutline = "On", fillMode = "Solid", hpGhost = "On", joints = "On",
 			velLen = 8, velArrow = "On", dmgSpeed = "Normal", dmgHeals = "Off",
+			trailMode = "Gradient", trailFade = "On", trailTaper = "On", trailWidth = 2.5, trailLife = 2,
 		}
 
 		local OPT = {
@@ -821,6 +875,7 @@ return function(lib)
 			onoff = {"On", "Off"},
 			fillModes = {"Solid", "Fade Down", "Fade Up", "Two-tone"},
 			dmgSpeeds = {"Slow", "Normal", "Fast"},
+			trailWidths = {Thin = 1.5, Normal = 2.5, Thick = 4},
 		}
 		local DMG_DUR = {Slow = 1.6, Normal = 1.1, Fast = 0.7}
 
@@ -851,6 +906,8 @@ return function(lib)
 			head = newSlot(Color3.fromRGB(255, 255, 255)),
 			look = newSlot(Color3.fromRGB(255, 255, 255)),
 			vel = newSlot(Color3.fromRGB(120, 205, 255)),
+			trail = newSlot(Color3.fromRGB(110, 200, 255), 0.9),
+			trail2 = newSlot(Color3.fromRGB(180, 92, 255), 0.9),
 			dmg = newSlot(Color3.fromRGB(255, 88, 88)),
 			heal = newSlot(Color3.fromRGB(96, 235, 134)),
 			arrow = newSlot(Color3.fromRGB(255, 255, 255)),
@@ -2061,6 +2118,25 @@ return function(lib)
 				choices.velArrow = secChoice(sec, OPT.onoff, opt.velArrow, function(n) opt.velArrow = n end)
 				secColor(sec, slots.vel)
 			end
+			build.Trail = function(sec)
+				secLabel(sec, "Mode")
+				choices.trailMode = secChoice(sec, {"Solid", "Gradient"}, opt.trailMode, function(n) opt.trailMode = n end)
+				secLabel(sec, "Fade tail")
+				choices.trailFade = secChoice(sec, OPT.onoff, opt.trailFade, function(n) opt.trailFade = n end)
+				secLabel(sec, "Taper")
+				choices.trailTaper = secChoice(sec, OPT.onoff, opt.trailTaper, function(n) opt.trailTaper = n end)
+				secLabel(sec, "Width")
+				choices.trailWidth = secChoice(sec, {"Thin", "Normal", "Thick"}, "Normal", function(n) opt.trailWidth = OPT.trailWidths[n] end)
+				secLabel(sec, "Length")
+				local set = makeSlider(sec.f, 14, sec.y, 0.5, 4, 0.5, opt.trailLife, function(v)
+					return v .. " sec"
+				end, function(v)
+					opt.trailLife = v
+				end)
+				choices.trailLife = {Set = set}
+				sec.y = sec.y + 38
+				secColors(sec, {Head = "trail", Tail = "trail2"}, {"Head", "Tail"}, true)
+			end
 			build.Tracers = function(sec)
 				secLabel(sec, "Start from")
 				choices.tracer = secChoice(sec, OPT.tracerOrigins, opt.tracerFrom, function(n) opt.tracerFrom = n end)
@@ -2227,7 +2303,7 @@ return function(lib)
 		-- ====================================================
 		local previewViewport
 		local prevBox, prevBoxOut, prevSkel, prevJoint, prevHp, prevTrc = {}, {}, {}, {}, {}, {}
-		local prevFill, prevArmor, prevLook, prevVel, prevGhost = {}, {}, {}, {}, {}
+		local prevFill, prevArmor, prevLook, prevVel, prevGhost, prevTrail = {}, {}, {}, {}, {}, {}
 		local prevTexts = {}
 		local prevStatus = {}
 		local prevGhostState = {}
@@ -2291,6 +2367,7 @@ return function(lib)
 			hidePool(prevLook)
 			hidePool(prevVel)
 			hidePool(prevGhost)
+			hidePool(prevTrail)
 			hideDotPreview()
 			for key in pairs(prevTexts) do
 				hidePreviewText(key)
@@ -2365,6 +2442,26 @@ return function(lib)
 				l.BackgroundTransparency = 1 - a
 				l.Position = UDim2.fromOffset((sg[1] + sg[3]) / 2, (sg[2] + sg[4]) / 2)
 				l.Size = UDim2.fromOffset(len + thick, thick)
+				l.Rotation = math.deg(math.atan2(dy, dx))
+				l.Visible = true
+			end
+			for i = count + 1, #pool do
+				pool[i].Visible = false
+			end
+		end
+
+		-- segments with their own color / opacity / thickness: {x1, y1, x2, y2, color, opacity, thickness}
+		local function drawSegPool(pool, count, list, z)
+			for i = 1, count do
+				local l = getFrame(pool, i, "EspTrail", z)
+				local sg = list[i]
+				local dx, dy = sg[3] - sg[1], sg[4] - sg[2]
+				local len = math.sqrt(dx * dx + dy * dy)
+				l.AnchorPoint = Vector2.new(0.5, 0.5)
+				l.BackgroundColor3 = sg[5]
+				l.BackgroundTransparency = 1 - sg[6]
+				l.Position = UDim2.fromOffset((sg[1] + sg[3]) / 2, (sg[2] + sg[4]) / 2)
+				l.Size = UDim2.fromOffset(len + sg[7], sg[7])
 				l.Rotation = math.deg(math.atan2(dy, dx))
 				l.Visible = true
 			end
@@ -2591,6 +2688,31 @@ return function(lib)
 			end
 			drawLinePool(prevVel, n, velSeg, colorOf(slots.vel), slots.vel.a, 2)
 
+			-- movement trail: a wavy path trailing off to the left of the avatar
+			n = 0
+			if feat.Trail then
+				local rootPart = model:FindFirstChild("HumanoidRootPart") or model:FindFirstChild("UpperTorso") or model:FindFirstChild("Torso")
+				if rootPart then
+					local rv = camera.CFrame.RightVector
+					local dir = Vector3.new(rv.X, 0, rv.Z)
+					if dir.Magnitude > 0.01 then
+						dir = dir.Unit
+						local foot = rootPart.Position - Vector3.new(0, 2.6, 0)
+						local cnt = 26
+						for i = 1, cnt do
+							local age = (i - 1) / (cnt - 1)
+							tmpPos[i] = foot - dir * (age * 4.2) + Vector3.new(0, math.sin(age * 7 - now * 4) * 0.22 * age, 0)
+							tmpAge[i] = age
+						end
+						local c1 = colorFor(slots.trail, nil, true)
+						local c2 = colorOverridden() and c1:Lerp(Color3.new(0, 0, 0), 0.55) or colorOf(slots.trail2)
+						n = computeTrail(cnt, project, c1, slots.trail.a, c2, slots.trail2.a,
+							opt.trailMode == "Gradient", opt.trailFade == "On", opt.trailWidth, opt.trailTaper == "On")
+					end
+				end
+			end
+			drawSegPool(prevTrail, n, trailSegs, 19)
+
 			if feat.HeadDot then
 				local hx, hy, hr = computeHead(model, project)
 				if hx then
@@ -2785,6 +2907,7 @@ return function(lib)
 				trc = {}, trcShown = 0,
 				look = {}, lookShown = 0,
 				vel = {}, velShown = 0,
+				trailLines = {}, trailShown = 0, trail = nil,
 				hp = {}, hpShown = 0, hpBg = nil, hpBgOn = false,
 				ghostSq = nil, ghostOn = false, ghost = nil,
 				arm = {}, armShown = 0, armBg = nil, armBgOn = false,
@@ -2809,7 +2932,7 @@ return function(lib)
 			if not rec then
 				return
 			end
-			for _, list in ipairs({rec.box, rec.boxOut, rec.skel, rec.joint, rec.trc, rec.look, rec.vel, rec.hp, rec.arm, rec.fillList}) do
+			for _, list in ipairs({rec.box, rec.boxOut, rec.skel, rec.joint, rec.trc, rec.look, rec.vel, rec.trailLines, rec.hp, rec.arm, rec.fillList}) do
 				for _, obj in ipairs(list) do
 					kill(obj)
 				end
@@ -2881,6 +3004,9 @@ return function(lib)
 			rec.lookShown = 0
 			hideShown(rec.vel, rec.velShown)
 			rec.velShown = 0
+			hideShown(rec.trailLines, rec.trailShown)
+			rec.trailShown = 0
+			rec.trail = nil
 			hideShown(rec.fillList, rec.fillShown)
 			rec.fillShown = 0
 			hideHpBar(rec)
@@ -2920,6 +3046,26 @@ return function(lib)
 				l.Thickness = thick
 				l.From = Vector2.new(sg[1], sg[2])
 				l.To = Vector2.new(sg[3], sg[4])
+				l.Visible = true
+			end
+			for i = count + 1, prevShown do
+				list[i].Visible = false
+			end
+			return count
+		end
+
+		-- movement trail segments (each has its own color / opacity / thickness)
+		local function setTrailLines(list, prevShown, count)
+			while #list < count do
+				table.insert(list, newLine(2))
+			end
+			for i = 1, count do
+				local s, l = trailSegs[i], list[i]
+				l.Color = s[5]
+				l.Transparency = dAlpha(s[6] * curFade)
+				l.Thickness = s[7]
+				l.From = Vector2.new(s[1], s[2])
+				l.To = Vector2.new(s[3], s[4])
 				l.Visible = true
 			end
 			for i = count + 1, prevShown do
@@ -3288,6 +3434,41 @@ return function(lib)
 			end
 			rec.velShown = setLines(rec.vel, rec.velShown, n, velSeg, colorOf(slots.vel), slots.vel.a, 1.5, 3)
 
+			-- movement trail: remember where the player has been, draw it as a ribbon
+			n = 0
+			if feat.Trail then
+				local now = os.clock()
+				local life = opt.trailLife
+				local foot = root.Position - Vector3.new(0, 3, 0)
+				local tr = rec.trail
+				if not tr then
+					tr = {}
+					rec.trail = tr
+				end
+				local last = tr[#tr]
+				if last and (foot - last.p).Magnitude > 25 then
+					table.clear(tr) -- teleport / respawn
+					last = nil
+				end
+				if not last or (now - last.t >= math.max(0.03, life / TRAIL_MAX) and (foot - last.p).Magnitude > 0.2) then
+					table.insert(tr, {p = foot, t = now})
+				end
+				while #tr > 0 and now - tr[1].t > life do
+					table.remove(tr, 1)
+				end
+				while #tr > TRAIL_MAX do
+					table.remove(tr, 1)
+				end
+				local cnt = gatherTrail(tr, foot, now, life)
+				local c1 = colorFor(slots.trail, player, true)
+				local c2 = colorOverridden() and c1:Lerp(Color3.new(0, 0, 0), 0.55) or colorOf(slots.trail2)
+				n = computeTrail(cnt, project, c1, slots.trail.a, c2, slots.trail2.a,
+					opt.trailMode == "Gradient", opt.trailFade == "On", opt.trailWidth, opt.trailTaper == "On")
+			elseif rec.trail then
+				rec.trail = nil
+			end
+			rec.trailShown = setTrailLines(rec.trailLines, rec.trailShown, n)
+
 			if feat.HeadDot then
 				local hx, hy, hr = computeHead(char, project)
 				if hx then
@@ -3487,7 +3668,7 @@ return function(lib)
 			for _, t in ipairs(dmgTexts) do
 				kill(t)
 			end
-			for _, pool in ipairs({prevBox, prevBoxOut, prevSkel, prevJoint, prevHp, prevTrc, prevFill, prevArmor, prevLook, prevVel, prevGhost}) do
+			for _, pool in ipairs({prevBox, prevBoxOut, prevSkel, prevJoint, prevHp, prevTrc, prevFill, prevArmor, prevLook, prevVel, prevGhost, prevTrail}) do
 				for _, f in ipairs(pool) do
 					f:Destroy()
 				end
@@ -3647,6 +3828,31 @@ return function(lib)
 			SetVelocityLength = function(studs) ui.choices.velLen.Set(studs) end, -- 2 - 14
 			SetVelocityArrowhead = function(value) onOff("velArrow", value) end,
 			SetVelocityColor = function(c) setSlot(slots.vel, c) end,
+
+			-- movement trail
+			SetMovementTrail = function(value) sw.Trail.Set(value) end,
+			SetTrailMode = function(name) pick("trailMode", {"Solid", "Gradient"}, name) end,
+			SetTrailFade = function(value) onOff("trailFade", value) end,
+			SetTrailTaper = function(value) onOff("trailTaper", value) end,
+			SetTrailWidth = function(name)
+				if OPT.trailWidths[name] then
+					ui.choices.trailWidth.Set(name)
+				end
+			end,
+			SetTrailLength = function(seconds) ui.choices.trailLife.Set(seconds) end, -- 0.5 - 4
+			SetTrailColors = function(head, tail, headAlpha, tailAlpha)
+				setSlot(slots.trail, head)
+				if tail then
+					setSlot(slots.trail2, tail)
+				end
+				if headAlpha then
+					slots.trail.a = math.clamp(headAlpha, 0, 1)
+				end
+				if tailAlpha then
+					slots.trail2.a = math.clamp(tailAlpha, 0, 1)
+				end
+				ui.refresh()
+			end,
 
 			-- tracers / arrows
 			SetTracerOrigin = function(name) pick("tracer", OPT.tracerOrigins, name) end,
