@@ -3,20 +3,10 @@
 --   local buildBoxEsp = loadstring(game:HttpGet(BOXESP_URL))()(lib)
 --   buildBoxEsp({pages = pages, fadeInfo = fadeInfo, slideInfo = slideInfo, popup = popup})
 --
--- main card:  Enabled / Team check / Visible check / Dead check / Self ESP / Team colors /
---             Visibility colors / Font / Render distance
--- feature card: one row per feature. Turning a feature on opens its settings right under the row,
--- the arrow on the row opens / closes them again without touching the switch.
---
--- new in this version:
---   Visibility colors   different color while the target is visible / hidden behind a wall
---   Box outline         dark outline behind the box lines
---   Gradient box fill   Solid / Fade Down / Fade Up / Two-tone
---   Joint dots          dots on every skeleton joint
---   Health ghost bar    trailing bar that shows the health you just lost
---   Damage numbers      floating -25 / +10 text when a player takes damage / heals
---   Velocity line       arrow that shows where a player is moving and how fast
---   Movement trail      ribbon behind the player's path; Solid or Gradient, fade, taper, length
+-- Every option starts OFF. Each module's settings open in their own side panel (the arrow on the row).
+-- New in this version: box shapes (Rounded / Dashed / Pulse / Health fill), health bar on any side with
+-- overheal + shield bars, chams damage pulse + outline thickness, hit markers, footstep rings,
+-- rewritten chams (budgeted Highlights, working preview), side panel + real dropdowns.
 
 return function(lib)
 	local Players = lib.Players
@@ -31,24 +21,34 @@ return function(lib)
 
 	local THICKNESS = 1.5
 	local PAD = 2
-	local SEG_MAX = 12
+	local SEG_MAX = 96
 	local BONE_MAX = 14
 	local JOINT_MAX = 15
 	local TRAIL_MAX = 40
 	local HP_SEGS = 16
 	local FILL_SEGS = 14
 	local HP_W = 3
+	local BAR_STEP = HP_W + 3
 	local LINE_H = 14
 	local ARMOR_MAX = 130
+	local SHIELD_MAX = 100
 	local LOOK_LEN = 6
-	local DEAD_HP = 10 -- 0 to 10 health counts as dead
+	local DEAD_HP = 10
 	local GHOST_HOLD = 0.45
 	local DMG_MAX = 24
+	local RING_MAX, RING_SEGS = 14, 16
+	local HIT_MAX = 6
+	local HL_MAX = 28
+	local STRIDE = 4.2
+	local HIT_WINDOW = 0.4
+	local DASH, GAP = 7, 5
 	local OUTLINE_COLOR = Color3.fromRGB(8, 8, 10)
 
 	local ARROW_SIZE = {Small = 9, Medium = 13, Large = 18}
 	local ARROW_RADIUS = {Near = 0.22, Mid = 0.34, Far = 0.44}
 	local STATUS_COLOR = Color3.fromRGB(170, 170, 176)
+	local HIT_DUR = {Slow = 0.8, Normal = 0.5, Fast = 0.3}
+	local CHAM_THICK = {Thin = 0, Normal = 1, Thick = 2}
 
 	local R15_PARTS = {
 		"Head", "UpperTorso", "LowerTorso",
@@ -119,7 +119,6 @@ return function(lib)
 		return hh, (mx == 0) and 0 or d / mx, mx
 	end
 
-	-- moves `cur` toward `target`; used for the bars, the numbers and the status fade
 	local SMOOTH = 3
 	local function approach(cur, target, dt, rate, eps)
 		if cur == nil then
@@ -131,6 +130,14 @@ return function(lib)
 			v = target
 		end
 		return v
+	end
+
+	local function easeOut(t)
+		return 1 - (1 - t) * (1 - t) * (1 - t)
+	end
+
+	local function pulseMul(now)
+		return 0.65 + 0.35 * math.sin(now * 5)
 	end
 
 	local function sameTeam(player)
@@ -163,7 +170,7 @@ return function(lib)
 		return tool and tool.Name or nil
 	end
 
-	-- returns armor as 0-1 and the raw value (nil = no armor value on this character)
+	-- armor: 0-1 and the raw value (nil = no armor value on this character)
 	local function armorFrac(char)
 		local effects = char:FindFirstChild("BodyEffects")
 		local armor = effects and effects:FindFirstChild("Armor")
@@ -173,8 +180,18 @@ return function(lib)
 		return nil
 	end
 
-	-- health ghost: holds the old value for a moment after damage, then slides down to the real value
-	-- st = {} per player (or per preview); cur / return value are 0-1
+	-- shield: BodyEffects.Shield / Shield value / "Shield" attribute (nil = none)
+	local function shieldValue(char)
+		local e = char:FindFirstChild("BodyEffects")
+		local v = (e and e:FindFirstChild("Shield")) or char:FindFirstChild("Shield")
+		if v and (v:IsA("NumberValue") or v:IsA("IntValue")) then
+			return v.Value
+		end
+		local a = char:GetAttribute("Shield")
+		return typeof(a) == "number" and a or nil
+	end
+
+	-- health ghost: holds the old value for a moment after damage, then slides to the real value
 	local function stepGhost(st, cur, dt)
 		if st.last == nil then
 			st.last, st.val, st.hold = cur, cur, 0
@@ -194,7 +211,7 @@ return function(lib)
 	end
 
 	-- ========================================================
-	-- status: Idle / Moving / Jumping / Dead (0-10 health)
+	-- status: Idle / Moving / Jumping / Dead
 	-- ========================================================
 	local STATUS_LIST = {"Idle", "Moving", "Jumping", "Dead"}
 
@@ -213,7 +230,6 @@ return function(lib)
 		return "Idle"
 	end
 
-	-- fades the old word out, swaps it, fades the new one in. returns text, alpha
 	local function stepStatus(st, name, dt)
 		if not st.text then
 			st.text, st.a = name, 0
@@ -233,11 +249,11 @@ return function(lib)
 	-- ========================================================
 	-- chams: Normal / Solid / Glow / Textured / Wireframe
 	--   Normal     highlight fill + outline
-	--   Solid      opaque flat fill, no outline
-	--   Glow       neon material + pulsing fill, no outline
-	--   Textured   forcefield material + soft fill, no outline
-	--   Wireframe  wire edges on every body part (outline color)
-	-- materials are changed on this client only and put back when chams stop
+	--   Solid      opaque flat fill
+	--   Glow       neon material + pulsing fill
+	--   Textured   forcefield material + soft fill
+	--   Wireframe  wire edges on every body part
+	-- extras: damage pulse, outline thickness (extra wire edges), Highlight budget
 	-- ========================================================
 	local CHAM_MODES = {"Normal", "Solid", "Glow", "Textured", "Wireframe"}
 	local MODE_MATERIAL = {Glow = Enum.Material.Neon, Textured = Enum.Material.ForceField}
@@ -299,19 +315,13 @@ return function(lib)
 		end
 	end
 
-	-- cfg: mode, walls (bool), fill / outline (Color3), fillA / outA (0-1), fade (0-1), folder
+	-- cfg: mode, walls, fill / outline (Color3), fillA / outA, fade, folder,
+	--      pulse (0-1), pulseColor, thick (0/1/2), noHighlight
 	function Chams.update(rec, char, cfg)
 		local st = rec.cham
 		if not st then
 			st = {orig = {}, wires = {}, scanAt = 0, wireAt = 0}
 			rec.cham = st
-		end
-		local h = st.hl
-		if not h or not h.Parent then
-			h = Instance.new("Highlight")
-			h.Name = "EspCham"
-			h.Parent = cfg.folder
-			st.hl = h
 		end
 		if st.char ~= char then
 			Chams.restoreParts(st)
@@ -319,32 +329,48 @@ return function(lib)
 			st.char = char
 			st.scanAt, st.wireAt = 0, 0
 		end
-		if h.Adornee ~= char then
-			h.Adornee = char
-		end
 
-		local mode = cfg.mode
-		local now = os.clock()
+		local mode, now = cfg.mode, os.clock()
+		local pulse = cfg.pulse or 0
+		local fillC = pulse > 0 and cfg.fill:Lerp(cfg.pulseColor, pulse * 0.8) or cfg.fill
+		local outC = pulse > 0 and cfg.outline:Lerp(cfg.pulseColor, pulse * 0.8) or cfg.outline
+
 		local fillT, outT = 1 - cfg.fillA * cfg.fade, 1 - cfg.outA * cfg.fade
 		if mode == "Solid" then
 			fillT, outT = 1 - cfg.fade, 1
 		elseif mode == "Glow" then
-			local pulse = 0.5 + 0.5 * math.sin(now * 3)
-			fillT = 1 - cfg.fillA * cfg.fade * (0.35 + 0.65 * pulse)
+			local p = 0.5 + 0.5 * math.sin(now * 3)
+			fillT = 1 - cfg.fillA * cfg.fade * (0.35 + 0.65 * p)
 			outT = 1
 		elseif mode == "Textured" then
-			fillT = 1 - cfg.fillA * cfg.fade * 0.5
-			outT = 1
-		elseif mode == "Wireframe" then
-			fillT, outT = 1, 1
+			fillT, outT = 1 - cfg.fillA * cfg.fade * 0.5, 1
 		end
-		h.FillColor = cfg.fill
-		h.FillTransparency = fillT
-		h.OutlineColor = cfg.outline
-		h.OutlineTransparency = outT
-		h.DepthMode = cfg.walls and Enum.HighlightDepthMode.AlwaysOnTop or Enum.HighlightDepthMode.Occluded
-		h.Enabled = true
+		if fillT < 1 then fillT = fillT * (1 - 0.6 * pulse) end
+		if outT < 1 then outT = outT * (1 - 0.6 * pulse) end
 
+		-- Highlight: budgeted (Roblox only draws ~31), never enabled in Wireframe mode
+		local h = st.hl
+		if cfg.noHighlight or mode == "Wireframe" then
+			if h then
+				h.Enabled = false
+			end
+		else
+			if not h or not h.Parent then
+				h = Instance.new("Highlight")
+				h.Name = "EspCham"
+				h.Parent = cfg.folder
+				st.hl = h
+			end
+			if h.Adornee ~= char then
+				h.Adornee = char
+			end
+			h.FillColor, h.FillTransparency = fillC, fillT
+			h.OutlineColor, h.OutlineTransparency = outC, outT
+			h.DepthMode = cfg.walls and Enum.HighlightDepthMode.AlwaysOnTop or Enum.HighlightDepthMode.Occluded
+			h.Enabled = true
+		end
+
+		-- materials (base color only, so nothing is repainted every frame)
 		local mat = MODE_MATERIAL[mode]
 		if mat then
 			if now >= st.scanAt then
@@ -367,7 +393,9 @@ return function(lib)
 			Chams.restoreParts(st)
 		end
 
-		if mode == "Wireframe" then
+		-- wire edges: Wireframe mode, or outline thickness Normal / Thick in any mode
+		local thick = cfg.thick or 0
+		if mode == "Wireframe" or thick > 0 then
 			if now >= st.wireAt then
 				st.wireAt = now + 1
 				for _, p in ipairs(char:GetDescendants()) do
@@ -379,7 +407,6 @@ return function(lib)
 							for _, e in ipairs(WIRE_EDGES) do
 								w:AddLine(Vector3.new(e[1] * hx, e[2] * hy, e[3] * hz), Vector3.new(e[4] * hx, e[5] * hy, e[6] * hz))
 							end
-							pcall(function() w.Thickness = 1.5 end)
 							w.Parent = cfg.folder
 							st.wires[p] = w
 						end
@@ -392,15 +419,75 @@ return function(lib)
 					end
 				end
 			end
-			local wt = 1 - cfg.outA * cfg.fade
+			local wt = 1 - cfg.outA * cfg.fade * (1 - 0.5 * pulse)
+			local th = (mode == "Wireframe" and 1.5 or 1) + thick * 1.5
 			for _, w in pairs(st.wires) do
-				w.Color3 = cfg.outline
+				w.Color3 = outC
 				w.Transparency = wt
 				w.AlwaysOnTop = cfg.walls
 				w.Visible = true
+				pcall(function() w.Thickness = th end)
 			end
 		elseif next(st.wires) then
 			Chams.clearWires(st)
+		end
+	end
+
+	-- preview chams: real shell parts inside the ViewportFrame (Highlights never render there)
+	local function makeShell(src, folder)
+		local c = src:Clone()
+		for _, ch in ipairs(c:GetChildren()) do
+			if not ch:IsA("DataModelMesh") then
+				ch:Destroy()
+			end
+		end
+		pcall(function() c.TextureID = "" end)
+		c.Anchored = true
+		c.CanCollide = false
+		c.CanQuery = false
+		c.CanTouch = false
+		c.CastShadow = false
+		c.Parent = folder
+		return c
+	end
+
+	function Chams.previewClear(state)
+		for _, sh in pairs(state.shells or {}) do
+			sh.fill.Transparency, sh.out.Transparency = 1, 1
+		end
+	end
+
+	function Chams.previewDestroy(state)
+		for _, sh in pairs(state.shells or {}) do
+			pcall(function() sh.fill:Destroy() end)
+			pcall(function() sh.out:Destroy() end)
+		end
+		state.shells = {}
+	end
+
+	function Chams.preview(model, folder, cfg, state)
+		state.shells = state.shells or {}
+		local pulse = cfg.pulse or 0
+		local fillC = cfg.fill:Lerp(cfg.pulseColor, pulse * 0.8)
+		local outC = cfg.outline:Lerp(cfg.pulseColor, pulse * 0.8)
+		local mat = ({Glow = Enum.Material.Neon, Textured = Enum.Material.ForceField})[cfg.mode] or Enum.Material.SmoothPlastic
+		local grow = 1.05 + 0.04 * (cfg.thick or 0)
+		local fillT = cfg.mode == "Solid" and 0 or (1 - cfg.fillA * (1 - 0.5 * pulse))
+		local outT = cfg.mode == "Solid" and 1 or (1 - cfg.outA * 0.55 * (1 + pulse))
+		for _, p in ipairs(model:GetDescendants()) do
+			if chamPart(p) and p.Transparency < 1 then
+				local sh = state.shells[p]
+				if not sh or not sh.fill.Parent then
+					sh = {fill = makeShell(p, folder), out = makeShell(p, folder)}
+					state.shells[p] = sh
+				end
+				sh.fill.CFrame, sh.fill.Size = p.CFrame, p.Size * 1.015
+				sh.fill.Color, sh.fill.Material = fillC, mat
+				sh.fill.Transparency = math.clamp(fillT, 0, 1)
+				sh.out.CFrame, sh.out.Size = p.CFrame, p.Size * grow
+				sh.out.Color, sh.out.Material = outC, Enum.Material.Neon
+				sh.out.Transparency = math.clamp(outT + 0.35, 0, 1)
+			end
 		end
 	end
 
@@ -544,7 +631,67 @@ return function(lib)
 		return #EDGES3D
 	end
 
-	local function computeBox(char, project, style, hasBounds)
+	-- box shapes (2D "Full" style): Square / Rounded / Dashed
+	local function pushSeg(n, ax, ay, bx, by)
+		local s = segs[n + 1]
+		if not s then
+			return n
+		end
+		s[1], s[2], s[3], s[4] = ax, ay, bx, by
+		return n + 1
+	end
+
+	local function edgeSegs(n, ax, ay, bx, by, dashed)
+		if not dashed then
+			return pushSeg(n, ax, ay, bx, by)
+		end
+		local dx, dy = bx - ax, by - ay
+		local len = math.sqrt(dx * dx + dy * dy)
+		if len < 1 then
+			return n
+		end
+		local ux, uy = dx / len, dy / len
+		local d = 0
+		while d < len do
+			local e = math.min(d + DASH, len)
+			n = pushSeg(n, ax + ux * d, ay + uy * d, ax + ux * e, ay + uy * e)
+			d = d + DASH + GAP
+		end
+		return n
+	end
+
+	local function shapedBox(x0, y0, x1, y1, shape)
+		local n = 0
+		if shape == "Rounded" then
+			local r = math.max(math.min(8, (x1 - x0) * 0.3, (y1 - y0) * 0.3), 1)
+			n = pushSeg(n, x0 + r, y0, x1 - r, y0)
+			n = pushSeg(n, x0 + r, y1, x1 - r, y1)
+			n = pushSeg(n, x0, y0 + r, x0, y1 - r)
+			n = pushSeg(n, x1, y0 + r, x1, y1 - r)
+			local corners = {
+				{x0 + r, y0 + r, -1, -1}, {x1 - r, y0 + r, 1, -1},
+				{x0 + r, y1 - r, -1, 1}, {x1 - r, y1 - r, 1, 1},
+			}
+			for _, c in ipairs(corners) do
+				local px, py = c[1] + c[3] * r, c[2]
+				for k = 1, 4 do
+					local a = math.rad(k * 90 / 4)
+					local qx, qy = c[1] + c[3] * r * math.cos(a), c[2] + c[4] * r * math.sin(a)
+					n = pushSeg(n, px, py, qx, qy)
+					px, py = qx, qy
+				end
+			end
+			return n
+		end
+		local dashed = shape == "Dashed"
+		n = edgeSegs(n, x0, y0, x1, y0, dashed)
+		n = edgeSegs(n, x1, y0, x1, y1, dashed)
+		n = edgeSegs(n, x1, y1, x0, y1, dashed)
+		n = edgeSegs(n, x0, y1, x0, y0, dashed)
+		return n
+	end
+
+	local function computeBox(char, project, style, hasBounds, shape)
 		if style == "3D" then
 			return computeBox3D(char, project)
 		end
@@ -566,11 +713,7 @@ return function(lib)
 			setSeg(8, x1, y1, x1, y1 - ch)
 			return 8
 		end
-		setSeg(1, x0, y0, x1, y0)
-		setSeg(2, x0, y1, x1, y1)
-		setSeg(3, x0, y0, x0, y1)
-		setSeg(4, x1, y0, x1, y1)
-		return 4
+		return shapedBox(x0, y0, x1, y1, shape)
 	end
 
 	-- returns the bone count and (when wantJoints) the number of joint dots in jointX / jointY
@@ -654,8 +797,7 @@ return function(lib)
 		return 1
 	end
 
-	-- velocity line: shaft (+ two arrowhead wings), pointing the way the player is moving.
-	-- the length grows with the speed, up to maxLen studs. returns the number of segments (0, 1 or 3)
+	-- velocity line: shaft (+ two arrowhead wings) in the direction of movement
 	local COS28, SIN28 = 0.8829, 0.4695
 	local function computeVelocity(rootPos, vel, project, maxLen, arrow)
 		local hv = Vector3.new(vel.X, 0, vel.Z)
@@ -686,7 +828,7 @@ return function(lib)
 		return 3
 	end
 
-	-- movement trail: points are world positions, newest first, with an age of 0 (head) to 1 (tail)
+	-- movement trail
 	local tmpPos, tmpAge = {}, {}
 	local trailSegs = {}
 	for i = 1, TRAIL_MAX do
@@ -694,7 +836,6 @@ return function(lib)
 	end
 	local trailPX, trailPY, trailPV = {}, {}, {}
 
-	-- fills tmpPos / tmpAge from a list of {p = Vector3, t = time} (oldest first) plus the current spot
 	local function gatherTrail(tr, foot, now, life)
 		local n = 1
 		tmpPos[1], tmpAge[1] = foot, 0
@@ -709,7 +850,6 @@ return function(lib)
 		return n
 	end
 
-	-- color / opacity / thickness of a trail piece at age t (0 = head, 1 = tail)
 	local function trailStyle(t, c1, a1, c2, a2, gradient, fade, width, taper)
 		local c, a = c1, a1
 		if gradient then
@@ -722,7 +862,6 @@ return function(lib)
 		return c, a, taper and width * (0.3 + 0.7 * (1 - t)) or width
 	end
 
-	-- turns tmpPos / tmpAge into screen segments {x1, y1, x2, y2, color, opacity, thickness}
 	local function computeTrail(count, project, c1, a1, c2, a2, gradient, fade, width, taper)
 		for i = 1, count do
 			trailPX[i], trailPY[i], trailPV[i] = project(tmpPos[i])
@@ -763,7 +902,6 @@ return function(lib)
 	end
 
 	-- box fill: one rect (Solid) or FILL_SEGS horizontal strips (gradient modes)
-	-- rect = {x, y, w, h, color, opacity}
 	local fillRects = {}
 	for i = 1, FILL_SEGS do
 		fillRects[i] = {0, 0, 0, 0, Color3.new(1, 1, 1), 1}
@@ -799,25 +937,130 @@ return function(lib)
 		return n
 	end
 
-	-- vertical bar (health / armor): fills `rects` from the bottom up, returns how many to draw
-	-- colorFn(t): t = 0 at the bottom of the bar, 1 at the top
-	local function fillBar(rects, x, bottom, H, w, frac, colorFn, gradient)
+	-- ========================================================
+	-- bars: health / overheal / shield / armor on any side of the box
+	-- ========================================================
+	local barRects, barBg, barInfo = {}, {}, {}
+	for _, key in ipairs({"hp", "ov", "sh", "arm"}) do
+		barRects[key] = {}
+		for i = 1, HP_SEGS do
+			barRects[key][i] = {0, 0, 0, 0, Color3.new(1, 1, 1)}
+		end
+		barBg[key] = {0, 0, 0, 0}
+		barInfo[key] = {x = 0, y = 0, w = 1, h = 1, tipX = 0, tipY = 0, horiz = false, side = "Left"}
+	end
+	local ghostRect = {0, 0, 0, 0}
+
+	-- track rectangle of the bar in slot idx (0 = closest to the box) on `side`
+	local function trackFor(side, idx)
+		local l, t = math.floor(bnd.minX - PAD), math.floor(bnd.minY - PAD)
+		local r, b = math.ceil(bnd.maxX + PAD), math.ceil(bnd.maxY + PAD)
+		local off = 3 + idx * BAR_STEP
+		if side == "Right" then
+			return r + off, t, HP_W, b - t, false
+		elseif side == "Top" then
+			return l, t - off - HP_W, r - l, HP_W, true
+		elseif side == "Bottom" then
+			return l, b + off, r - l, HP_W, true
+		end
+		return l - off - HP_W, t, HP_W, b - t, false
+	end
+
+	local function fillTrack(rects, x, y, w, h, horiz, frac, colorFn, gradient)
 		if frac <= 0 then
 			return 0
 		end
-		if not gradient then
-			local r = rects[1]
-			r[1], r[2], r[3], r[4], r[5] = x, bottom - H * frac, w, H * frac, colorFn(frac)
-			return 1
-		end
+		local count = gradient and HP_SEGS or 1
 		local n = 0
-		for i = 0, HP_SEGS - 1 do
-			local f0, f1 = i / HP_SEGS, (i + 1) / HP_SEGS
+		for i = 0, count - 1 do
+			local f0, f1 = i / count, (i + 1) / count
 			if frac > f0 then
-				local topF = math.min(f1, frac)
+				local tf = math.min(f1, frac)
 				n = n + 1
 				local r = rects[n]
-				r[1], r[2], r[3], r[4], r[5] = x, bottom - topF * H, w, (topF - f0) * H, colorFn((f0 + f1) / 2)
+				local col = gradient and colorFn((f0 + f1) / 2) or colorFn(frac)
+				if horiz then
+					r[1], r[2], r[3], r[4], r[5] = x + f0 * w, y, (tf - f0) * w, h, col
+				else
+					r[1], r[2], r[3], r[4], r[5] = x, y + h - tf * h, w, (tf - f0) * h, col
+				end
+			end
+		end
+		return n
+	end
+
+	local function computeBar(key, side, idx, frac, colorFn, gradient)
+		local x, y, w, h, horiz = trackFor(side, idx)
+		local bg = barBg[key]
+		bg[1], bg[2], bg[3], bg[4] = x - 1, y - 1, w + 2, h + 2
+		local info = barInfo[key]
+		info.x, info.y, info.w, info.h, info.horiz, info.side = x, y, w, h, horiz, side
+		if horiz then
+			info.tipX, info.tipY = x + w * frac, y
+		else
+			info.tipX, info.tipY = x, y + h - h * frac
+		end
+		return fillTrack(barRects[key], x, y, w, h, horiz, frac, colorFn, gradient)
+	end
+
+	-- the part of the health bar that was just lost
+	local function computeGhost(frac, gf)
+		local i = barInfo.hp
+		if i.horiz then
+			ghostRect[1], ghostRect[2], ghostRect[3], ghostRect[4] = i.x + i.w * frac, i.y, i.w * (gf - frac), i.h
+		else
+			ghostRect[1], ghostRect[2], ghostRect[3], ghostRect[4] = i.x, i.y + i.h - i.h * gf, i.w, i.h * (gf - frac)
+		end
+	end
+
+	-- text next to the bar stack. edge = outermost bar, tip = bar whose fill tip the text follows.
+	-- returns x center, y top
+	local function textPos(edge, tip, tw, th, extra)
+		local s = edge.side
+		if s == "Left" or s == "Right" then
+			local y = math.clamp(tip.tipY - th / 2, edge.y, math.max(edge.y, edge.y + edge.h - th))
+			if s == "Left" then
+				return edge.x - 3 - extra - tw / 2, y
+			end
+			return edge.x + edge.w + 3 + extra + tw / 2, y
+		end
+		local x = math.clamp(tip.tipX, edge.x + tw / 2, math.max(edge.x + tw / 2, edge.x + edge.w - tw / 2))
+		if s == "Top" then
+			return x, edge.y - th - 2 - extra
+		end
+		return x, edge.y + edge.h + 2 + extra
+	end
+
+	-- ========================================================
+	-- hit marker + footstep ring geometry
+	-- ========================================================
+	local hitSeg = {{0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}}
+	local function computeHit(cx, cy, size, style, scale)
+		local g, s = size * 0.35 * scale, size * scale
+		local d = style == "Plus" and {{1, 0}, {-1, 0}, {0, 1}, {0, -1}}
+			or {{0.7071, 0.7071}, {-0.7071, 0.7071}, {0.7071, -0.7071}, {-0.7071, -0.7071}}
+		for i = 1, 4 do
+			local q, ux, uy = hitSeg[i], d[i][1], d[i][2]
+			q[1], q[2], q[3], q[4] = cx + ux * g, cy + uy * g, cx + ux * s, cy + uy * s
+		end
+	end
+
+	local ringSeg, ringPX, ringPY, ringPV = {}, {}, {}, {}
+	for i = 1, RING_SEGS do
+		ringSeg[i] = {0, 0, 0, 0}
+	end
+	local function computeRing(center, radius, project)
+		for i = 0, RING_SEGS - 1 do
+			local a = i / RING_SEGS * math.pi * 2
+			ringPX[i + 1], ringPY[i + 1], ringPV[i + 1] = project(center + Vector3.new(math.cos(a) * radius, 0, math.sin(a) * radius))
+		end
+		local n = 0
+		for i = 1, RING_SEGS do
+			local j = i % RING_SEGS + 1
+			if ringPV[i] and ringPV[j] then
+				n = n + 1
+				local s = ringSeg[n]
+				s[1], s[2], s[3], s[4] = ringPX[i], ringPY[i], ringPX[j], ringPY[j]
 			end
 		end
 		return n
@@ -829,7 +1072,7 @@ return function(lib)
 		local popup = ctx.popup
 
 		-- ====================================================
-		-- state
+		-- state (everything starts OFF)
 		-- ====================================================
 		local master = false
 		local teamCheck = false
@@ -841,6 +1084,7 @@ return function(lib)
 		local FEATURES = {
 			"Box", "BoxFill", "Chams", "Name", "Health", "Armor", "ArmorText", "HealthText", "Skeleton",
 			"HeadDot", "LookDir", "VelLine", "Trail", "Tracers", "Arrows", "Distance", "Weapon", "Status", "Damage",
+			"HitMarker", "Footsteps",
 		}
 		local LABELS = {
 			Box = "Box Esp", BoxFill = "Box Fill", Chams = "Chams", Name = "Name Esp",
@@ -848,7 +1092,7 @@ return function(lib)
 			Skeleton = "Skeleton Esp", HeadDot = "Head Dot", LookDir = "Look Direction",
 			VelLine = "Velocity Line", Trail = "Movement Trail", Tracers = "Tracers", Arrows = "Off-screen Arrows",
 			Distance = "Distance Text", Weapon = "Weapon Text", Status = "Status Text",
-			Damage = "Damage Numbers",
+			Damage = "Damage Numbers", HitMarker = "Hit Markers", Footsteps = "Footstep Rings",
 		}
 		local feat = {TeamColors = false, VisColors = false}
 		for _, key in ipairs(FEATURES) do
@@ -856,17 +1100,21 @@ return function(lib)
 		end
 
 		local opt = {
-			style = "Full", nameSource = "Display", hpMode = "Gradient", hpFormat = "Number",
-			armFormat = "Number", skelThick = 1, tracerFrom = "Bottom", teamSource = "Custom",
-			headStyle = "Outline", chamStyle = "Normal", chamWalls = "On", arrowSize = "Medium",
-			arrowRadius = "Mid", lookLen = 6, self = false, dead = false, font = "UI",
-			boxOutline = "On", fillMode = "Solid", hpGhost = "On", joints = "On",
-			velLen = 8, velArrow = "On", dmgSpeed = "Normal", dmgHeals = "Off",
-			trailMode = "Gradient", trailFade = "On", trailTaper = "On", trailWidth = 2.5, trailLife = 2,
+			style = "Full", boxShape = "Square", boxPulse = "Off", boxOutline = "Off",
+			nameSource = "Display", hpMode = "Gradient", hpFormat = "Number", armFormat = "Number",
+			hpSide = "Left", overheal = "Off", shield = "Off", hpGhost = "Off",
+			skelThick = 1, joints = "Off", tracerFrom = "Bottom", teamSource = "Custom",
+			headStyle = "Outline", chamStyle = "Normal", chamWalls = "Off", chamPulse = "Off", chamThick = "Thin",
+			arrowSize = "Medium", arrowRadius = "Mid", lookLen = 6, self = false, dead = false, font = "UI",
+			fillMode = "Solid", velLen = 8, velArrow = "Off", dmgSpeed = "Normal", dmgHeals = "Off",
+			trailMode = "Gradient", trailFade = "Off", trailTaper = "Off", trailWidth = 2.5, trailLife = 2,
+			hitStyle = "Cross", hitSize = 8, hitDur = "Normal", hitAnchor = "Crosshair",
+			stepRadius = 6, stepLife = 1.2, stepSelf = "Off",
 		}
 
 		local OPT = {
 			styles = {"Full", "Corners", "3D"},
+			boxShapes = {"Square", "Rounded", "Dashed"},
 			nameSources = {"Display", "Username", "Both"},
 			formats = {"Number", "Percent"},
 			thicknesses = {Thin = 1, Normal = 1.5, Thick = 2.5},
@@ -876,9 +1124,13 @@ return function(lib)
 			arrowRadii = {"Near", "Mid", "Far"},
 			fonts = {"UI", "System", "Plex", "Mono"},
 			onoff = {"On", "Off"},
-			fillModes = {"Solid", "Fade Down", "Fade Up", "Two-tone"},
+			fillModes = {"Solid", "Fade Down", "Fade Up", "Two-tone", "Health"},
 			dmgSpeeds = {"Slow", "Normal", "Fast"},
 			trailWidths = {Thin = 1.5, Normal = 2.5, Thick = 4},
+			sides = {"Left", "Right", "Top", "Bottom"},
+			chamThicks = {"Thin", "Normal", "Thick"},
+			hitStyles = {"Cross", "Plus"},
+			hitAnchors = {"Crosshair", "Target"},
 		}
 		local DMG_DUR = {Slow = 1.6, Normal = 1.1, Fast = 0.7}
 
@@ -905,6 +1157,8 @@ return function(lib)
 			hpMid = newSlot(Color3.fromRGB(240, 210, 60)),
 			hpLow = newSlot(Color3.fromRGB(235, 60, 60)),
 			ghost = newSlot(Color3.fromRGB(238, 238, 244)),
+			overheal = newSlot(Color3.fromRGB(255, 200, 60)),
+			shield = newSlot(Color3.fromRGB(80, 220, 255)),
 			armor = newSlot(Color3.fromRGB(70, 140, 255)),
 			head = newSlot(Color3.fromRGB(255, 255, 255)),
 			look = newSlot(Color3.fromRGB(255, 255, 255)),
@@ -913,9 +1167,13 @@ return function(lib)
 			trail2 = newSlot(Color3.fromRGB(180, 92, 255), 0.9),
 			dmg = newSlot(Color3.fromRGB(255, 88, 88)),
 			heal = newSlot(Color3.fromRGB(96, 235, 134)),
+			hit = newSlot(Color3.fromRGB(255, 255, 255)),
+			kill = newSlot(Color3.fromRGB(255, 70, 70)),
+			step = newSlot(Color3.fromRGB(255, 255, 255), 0.8),
 			arrow = newSlot(Color3.fromRGB(255, 255, 255)),
 			chamFill = newSlot(Color3.fromRGB(190, 190, 200), 0.35),
 			chamOutline = newSlot(Color3.fromRGB(255, 255, 255), 0.9),
+			chamPulse = newSlot(Color3.fromRGB(255, 70, 70)),
 			ally = newSlot(Color3.fromRGB(80, 200, 120)),
 			enemy = newSlot(Color3.fromRGB(235, 70, 70)),
 			visC = newSlot(Color3.fromRGB(96, 235, 134)),
@@ -926,8 +1184,7 @@ return function(lib)
 		local curVis = nil
 
 		-- Visibility colors beat the feature's own color (useVis = this element takes part);
-		-- Team colors off -> the feature's own color; "Custom" -> ally / enemy; "Roblox" -> team color
-		-- player == nil is the preview (shows the enemy color)
+		-- Team colors off -> own color; "Custom" -> ally / enemy; "Roblox" -> team color
 		local function colorFor(slot, player, useVis)
 			if useVis and feat.VisColors and curVis ~= nil then
 				return curVis and colorOf(slots.visC) or colorOf(slots.hidC)
@@ -947,7 +1204,6 @@ return function(lib)
 			return colorOf(slot)
 		end
 
-		-- true when colorFor() would not give the feature's own color
 		local function colorOverridden()
 			return feat.TeamColors or (feat.VisColors and curVis ~= nil)
 		end
@@ -1000,6 +1256,7 @@ return function(lib)
 		local OFF_KNOB = Color3.fromRGB(140, 140, 146)
 		local LOCKED_T = 0.6
 		local ROW_H, SLIDER_H = 44, 56
+		local PANEL_W = 270
 
 		local function toHex(c)
 			return string.format("#%02X%02X%02X", math.floor(c.R * 255 + 0.5), math.floor(c.G * 255 + 0.5), math.floor(c.B * 255 + 0.5))
@@ -1064,12 +1321,13 @@ return function(lib)
 		end)
 
 		-- ====================================================
-		-- page: two cards inside a scroll frame. every row is an "item":
-		--   container (clips) -> row (44px) + optional dropdown under it
+		-- page: two cards inside a scroll frame + a settings panel on the right.
+		-- every row is an "item": container (clips) -> row (44px)
+		-- an item's settings frame ("drop") lives in the panel while that item is open
 		-- ====================================================
 		local GAP = 10
-		local lockables = {} -- things that fade / ignore input while "Enabled" is off
-		local items = {}     -- [feature key] = item
+		local lockables = {}
+		local items = {}
 		local cards = {}
 		local layoutDirty = true
 		local openItem = nil
@@ -1088,6 +1346,70 @@ return function(lib)
 		scroll.ElasticBehavior = Enum.ElasticBehavior.Never
 		scroll.VerticalScrollBarInset = Enum.ScrollBarInset.None
 		scroll.Parent = page
+
+		-- closed settings frames are parked here
+		local panelStore = Instance.new("Folder")
+		panelStore.Name = "EspPanelStore"
+		panelStore.Parent = page
+
+		local panel = Instance.new("Frame")
+		panel.Name = "EspSettingsPanel"
+		panel.AnchorPoint = Vector2.new(1, 0)
+		panel.Position = UDim2.new(1, -12, 0, 72)
+		panel.Size = UDim2.new(0, PANEL_W, 1, -84)
+		panel.BackgroundColor3 = DROP_BG
+		panel.BorderSizePixel = 0
+		panel.ClipsDescendants = true
+		panel.ZIndex = 40
+		panel.Visible = false
+		panel.Parent = page
+		addCorner(panel, 8)
+		addStroke(panel, CARD_STROKE)
+
+		local panelTitle = Instance.new("TextLabel")
+		panelTitle.BackgroundTransparency = 1
+		panelTitle.Position = UDim2.fromOffset(14, 0)
+		panelTitle.Size = UDim2.new(1, -50, 0, 34)
+		panelTitle.Font = Enum.Font.GothamBold
+		panelTitle.Text = ""
+		panelTitle.TextColor3 = TEXT_DIM
+		panelTitle.TextSize = 11
+		panelTitle.TextXAlignment = Enum.TextXAlignment.Left
+		panelTitle.ZIndex = 41
+		panelTitle.Parent = panel
+
+		local panelClose = Instance.new("TextButton")
+		panelClose.AnchorPoint = Vector2.new(1, 0)
+		panelClose.Position = UDim2.new(1, -8, 0, 6)
+		panelClose.Size = UDim2.fromOffset(22, 22)
+		panelClose.BackgroundTransparency = 1
+		panelClose.AutoButtonColor = false
+		panelClose.Font = Enum.Font.GothamBold
+		panelClose.Text = "x"
+		panelClose.TextColor3 = TEXT_SOFT
+		panelClose.TextSize = 14
+		panelClose.ZIndex = 41
+		panelClose.Parent = panel
+
+		local panelLine = Instance.new("Frame")
+		panelLine.Position = UDim2.fromOffset(10, 34)
+		panelLine.Size = UDim2.new(1, -20, 0, 1)
+		panelLine.BackgroundColor3 = CARD_STROKE
+		panelLine.BorderSizePixel = 0
+		panelLine.ZIndex = 41
+		panelLine.Parent = panel
+
+		local panelScroll = Instance.new("ScrollingFrame")
+		panelScroll.BackgroundTransparency = 1
+		panelScroll.BorderSizePixel = 0
+		panelScroll.Position = UDim2.fromOffset(0, 38)
+		panelScroll.Size = UDim2.new(1, 0, 1, -38)
+		panelScroll.CanvasSize = UDim2.fromOffset(0, 100)
+		panelScroll.ScrollBarThickness = 3
+		panelScroll.ScrollBarImageColor3 = Color3.fromRGB(90, 90, 100)
+		panelScroll.ElasticBehavior = Enum.ElasticBehavior.Never
+		panelScroll.ZIndex = 41
+		panelScroll.Parent = panel
 
 		local function newCard(name)
 			local f = Instance.new("Frame")
@@ -1219,29 +1541,48 @@ return function(lib)
 			return obj
 		end
 
+		-- open / close an item's settings in the side panel
 		local function setOpen(it, want)
 			if not it.drop then
 				return
 			end
 			if want and openItem and openItem ~= it then
 				openItem.open = false
+				openItem.drop.Parent = panelStore
 			end
 			it.open = want
 			if want then
 				openItem = it
+				it.drop.Parent = panelScroll
+				it.drop.Position = UDim2.fromOffset(0, 0)
+				it.drop.Size = UDim2.new(1, 0, 0, it.dropH)
+				panelTitle.Text = string.upper(it.title or "Settings")
+				panelScroll.CanvasSize = UDim2.fromOffset(0, it.dropH + 10)
+				panelScroll.CanvasPosition = Vector2.zero
 			elseif openItem == it then
 				openItem = nil
+				it.drop.Parent = panelStore
 			end
+			panel.Visible = openItem ~= nil
+			TweenService:Create(scroll, fadeInfo, {
+				Size = openItem and UDim2.new(1, -(PANEL_W + 20), 1, -66) or UDim2.new(1, 0, 1, -66),
+			}):Play()
 		end
+		panelClose.MouseButton1Click:Connect(function()
+			if openItem then
+				setOpen(openItem, false)
+			end
+		end)
 
-		-- arrow button on the row + the dropdown area under it
+		-- arrow button on the row; its settings frame goes to the panel when opened
 		local function addDropdown(it, chevX, rowClick)
 			local drop = Instance.new("Frame")
 			drop.BackgroundColor3 = DROP_BG
+			drop.BackgroundTransparency = 1
 			drop.BorderSizePixel = 0
-			drop.Position = UDim2.fromOffset(0, it.rowH)
 			drop.Size = UDim2.new(1, 0, 0, 10)
-			drop.Parent = it.frame
+			drop.ZIndex = 41
+			drop.Parent = panelStore
 			it.drop = drop
 
 			if rowClick then
@@ -1310,10 +1651,11 @@ return function(lib)
 			end})
 		end
 
+		-- rows keep a fixed height now (the settings live in the panel)
 		local function layoutCard(card)
 			local y = 0
 			for _, it in ipairs(card.items) do
-				local h = it.rowH + it.dropH * it.t
+				local h = it.rowH
 				it.frame.Position = UDim2.fromOffset(0, y)
 				it.frame.Size = UDim2.new(1, 0, 0, h)
 				y = y + h
@@ -1333,9 +1675,8 @@ return function(lib)
 							it.t = target
 						end
 						if it.arrow then
-							it.arrow.Rotation = 180 * it.t
+							it.arrow.Rotation = -90 * it.t
 						end
-						layoutDirty = true
 					end
 				end
 			end
@@ -1350,11 +1691,12 @@ return function(lib)
 
 		local function switchItem(card, label, onChange, gated)
 			local it = addItem(card, ROW_H)
+			it.title = label
 			addRowLabel(it.row, label)
 			return it, makeSwitch(it.row, onChange, gated)
 		end
 
-		local sw = {} -- every switch, by name / feature key
+		local sw = {}
 
 		-- ---------- card 1 ----------
 		do
@@ -1366,12 +1708,10 @@ return function(lib)
 			it, sw.self = switchItem(card1, "Self ESP", function(on) opt.self = on end, true)
 			items.TeamColors, sw.TeamColors = switchItem(card1, "Team colors", function(on)
 				feat.TeamColors = on
-				setOpen(items.TeamColors, on)
 			end, true)
 			addDropdown(items.TeamColors)
 			items.VisColors, sw.VisColors = switchItem(card1, "Visibility colors", function(on)
 				feat.VisColors = on
-				setOpen(items.VisColors, on)
 			end, true)
 			addDropdown(items.VisColors)
 		end
@@ -1380,6 +1720,7 @@ return function(lib)
 		local fontValue
 		do
 			local it = addItem(card1, ROW_H)
+			it.title = "Font"
 			items.Font = it
 			addRowLabel(it.row, "Font")
 			fontValue = Instance.new("TextLabel")
@@ -1460,11 +1801,10 @@ return function(lib)
 			end)
 		end
 
-		-- ---------- card 2: one row per feature ----------
+		-- ---------- card 2: one row per feature (the arrow opens its settings panel) ----------
 		for _, key in ipairs(FEATURES) do
 			items[key], sw[key] = switchItem(card2, LABELS[key], function(on)
 				feat[key] = on
-				setOpen(items[key], on)
 			end, true)
 			if key ~= "Status" then
 				addDropdown(items[key])
@@ -1494,7 +1834,7 @@ return function(lib)
 		refreshLocks()
 
 		-- ====================================================
-		-- dropdown contents (built once, filled into each item's drop frame)
+		-- settings panel contents (built once, one frame per module)
 		-- ====================================================
 		local function buildDrops()
 			local pickers, choices, dotList = {}, {}, {}
@@ -1509,6 +1849,7 @@ return function(lib)
 				l.TextColor3 = TEXT_DIM
 				l.TextSize = 12
 				l.TextXAlignment = Enum.TextXAlignment.Left
+				l.ZIndex = 42
 				l.Parent = parent
 				return l
 			end
@@ -1520,6 +1861,7 @@ return function(lib)
 				dot.Size = UDim2.fromOffset(10, 10)
 				dot.BorderSizePixel = 0
 				dot.BackgroundColor3 = colorOf(slots[slotKey])
+				dot.ZIndex = 43
 				dot.Parent = button
 				addCorner(dot, 3)
 				table.insert(dotList, {dot = dot, key = slotKey})
@@ -1536,6 +1878,7 @@ return function(lib)
 				row.BackgroundTransparency = 1
 				row.Position = UDim2.fromOffset(x, y)
 				row.Size = UDim2.new(1, -(x + 14), 0, 26)
+				row.ZIndex = 42
 				row.Parent = parent
 
 				if cols then
@@ -1595,6 +1938,7 @@ return function(lib)
 					btn.TextColor3 = TEXT_SOFT
 					btn.TextSize = 13
 					btn.TextScaled = true
+					btn.ZIndex = 42
 					btn.Parent = row
 					local fit = Instance.new("UITextSizeConstraint")
 					fit.MaxTextSize = 13
@@ -1621,6 +1965,7 @@ return function(lib)
 				valueLabel.TextColor3 = TEXT_SOFT
 				valueLabel.TextSize = 12
 				valueLabel.TextXAlignment = Enum.TextXAlignment.Right
+				valueLabel.ZIndex = 42
 				valueLabel.Parent = parent
 
 				local track = Instance.new("Frame")
@@ -1628,6 +1973,7 @@ return function(lib)
 				track.Size = UDim2.new(1, -(x + 14), 0, 4)
 				track.BackgroundColor3 = OFF_TRACK
 				track.BorderSizePixel = 0
+				track.ZIndex = 42
 				track.Parent = parent
 				addCorner(track, 2)
 
@@ -1635,6 +1981,7 @@ return function(lib)
 				fill.BackgroundColor3 = ON_TRACK
 				fill.BorderSizePixel = 0
 				fill.Size = UDim2.fromScale(0, 1)
+				fill.ZIndex = 43
 				fill.Parent = track
 				addCorner(fill, 2)
 
@@ -1643,7 +1990,7 @@ return function(lib)
 				knob.Size = UDim2.fromOffset(12, 12)
 				knob.BackgroundColor3 = Color3.fromRGB(245, 245, 248)
 				knob.BorderSizePixel = 0
-				knob.ZIndex = 2
+				knob.ZIndex = 44
 				knob.Parent = track
 				addCorner(knob, 6)
 
@@ -1662,7 +2009,7 @@ return function(lib)
 				hit.Text = ""
 				hit.Position = UDim2.fromOffset(x - 4, y + 12)
 				hit.Size = UDim2.new(1, -(x + 14) + 8, 0, 24)
-				hit.ZIndex = 3
+				hit.ZIndex = 45
 				hit.Parent = parent
 				bindDrag(hit, function(m)
 					local tp, ts = track.AbsolutePosition, track.AbsoluteSize
@@ -1674,7 +2021,6 @@ return function(lib)
 			end
 
 			-- ---------- shared color picker window ----------
-			-- every color row shows a small square; clicking it opens this one window bound to that color
 			local PW = 240
 			local PK = {slot = nil, owner = nil, alpha = false}
 
@@ -1704,7 +2050,7 @@ return function(lib)
 				b.BackgroundTransparency = 1
 				b.AutoButtonColor = false
 				b.Text = ""
-				b.ZIndex = 5
+				b.ZIndex = 55
 				b.Parent = parent
 				return b
 			end
@@ -1715,7 +2061,7 @@ return function(lib)
 				c.Size = UDim2.fromOffset(6, 18)
 				c.BackgroundColor3 = Color3.new(1, 1, 1)
 				c.BorderSizePixel = 0
-				c.ZIndex = 4
+				c.ZIndex = 54
 				c.Parent = parent
 				addCorner(c, 3)
 				addStroke(c, Color3.fromRGB(20, 20, 23))
@@ -1727,6 +2073,7 @@ return function(lib)
 			sv.Size = UDim2.fromOffset(PW - 24, 140)
 			sv.BackgroundColor3 = Color3.fromHSV(0, 1, 1)
 			sv.BorderSizePixel = 0
+			sv.ZIndex = 51
 			sv.Parent = pop
 			addCorner(sv, 4)
 
@@ -1734,6 +2081,7 @@ return function(lib)
 			white.Size = UDim2.fromScale(1, 1)
 			white.BackgroundColor3 = Color3.new(1, 1, 1)
 			white.BorderSizePixel = 0
+			white.ZIndex = 52
 			white.Parent = sv
 			addCorner(white, 4)
 			local whiteGradient = Instance.new("UIGradient")
@@ -1747,6 +2095,7 @@ return function(lib)
 			black.Size = UDim2.fromScale(1, 1)
 			black.BackgroundColor3 = Color3.new(0, 0, 0)
 			black.BorderSizePixel = 0
+			black.ZIndex = 53
 			black.Parent = sv
 			addCorner(black, 4)
 			local blackGradient = Instance.new("UIGradient")
@@ -1762,7 +2111,7 @@ return function(lib)
 			svCursor.Size = UDim2.fromOffset(12, 12)
 			svCursor.BackgroundTransparency = 1
 			svCursor.BorderSizePixel = 0
-			svCursor.ZIndex = 4
+			svCursor.ZIndex = 54
 			svCursor.Parent = sv
 			addCorner(svCursor, 1000)
 			addStroke(svCursor, Color3.new(1, 1, 1)).Thickness = 2
@@ -1773,6 +2122,7 @@ return function(lib)
 			hueBar.Size = UDim2.fromOffset(PW - 24, 12)
 			hueBar.BackgroundColor3 = Color3.new(1, 1, 1)
 			hueBar.BorderSizePixel = 0
+			hueBar.ZIndex = 51
 			hueBar.Parent = pop
 			addCorner(hueBar, 6)
 			local hueKeys = {}
@@ -1790,12 +2140,14 @@ return function(lib)
 			alphaBar.Size = UDim2.fromOffset(PW - 24, 12)
 			alphaBar.BackgroundColor3 = Color3.fromRGB(58, 58, 64)
 			alphaBar.BorderSizePixel = 0
+			alphaBar.ZIndex = 51
 			alphaBar.Parent = pop
 			addCorner(alphaBar, 6)
 			local alphaFill = Instance.new("Frame")
 			alphaFill.Size = UDim2.fromScale(1, 1)
 			alphaFill.BackgroundColor3 = Color3.new(1, 1, 1)
 			alphaFill.BorderSizePixel = 0
+			alphaFill.ZIndex = 52
 			alphaFill.Parent = alphaBar
 			addCorner(alphaFill, 6)
 			local alphaGradient = Instance.new("UIGradient")
@@ -1811,6 +2163,7 @@ return function(lib)
 			pSwatch.Size = UDim2.fromOffset(26, 26)
 			pSwatch.BackgroundColor3 = Color3.new(1, 1, 1)
 			pSwatch.BorderSizePixel = 0
+			pSwatch.ZIndex = 51
 			pSwatch.Parent = pop
 			addCorner(pSwatch, 6)
 			addStroke(pSwatch, FIELD_STROKE)
@@ -1827,6 +2180,7 @@ return function(lib)
 				b.TextColor3 = TEXT_MAIN
 				b.TextSize = 13
 				b.Size = UDim2.fromOffset(60, 26)
+				b.ZIndex = 51
 				b.Parent = pop
 				addCorner(b, 6)
 				addStroke(b, FIELD_STROKE)
@@ -1943,7 +2297,7 @@ return function(lib)
 				changed()
 			end)
 
-			-- a row in a dropdown: label on the left, color square on the right
+			-- a row in a settings panel: label on the left, color square on the right
 			local function makeSwatch(parent, y, withAlpha, labelText, item)
 				local S = {slot = nil, item = item}
 				smallLabel(parent, labelText, 14, y + 6)
@@ -1955,6 +2309,7 @@ return function(lib)
 				btn.AutoButtonColor = false
 				btn.Text = ""
 				btn.BorderSizePixel = 0
+				btn.ZIndex = 42
 				btn.Parent = parent
 				addCorner(btn, 6)
 				addStroke(btn, Color3.fromRGB(70, 70, 76))
@@ -1968,6 +2323,7 @@ return function(lib)
 				hexLabel.TextColor3 = TEXT_SOFT
 				hexLabel.TextSize = 12
 				hexLabel.TextXAlignment = Enum.TextXAlignment.Right
+				hexLabel.ZIndex = 42
 				hexLabel.Parent = parent
 
 				function S.Refresh()
@@ -1995,13 +2351,136 @@ return function(lib)
 				return S
 			end
 
-			-- ---------- section helpers: stack things top to bottom inside a dropdown ----------
+			-- ---------- real dropdown (list floats above the window, never clipped) ----------
+			local ddBlocker = Instance.new("TextButton")
+			ddBlocker.BackgroundTransparency = 1
+			ddBlocker.AutoButtonColor = false
+			ddBlocker.Text = ""
+			ddBlocker.Size = UDim2.fromScale(1, 1)
+			ddBlocker.ZIndex = 59
+			ddBlocker.Visible = false
+			ddBlocker.Parent = win.frame
+
+			local ddList = Instance.new("Frame")
+			ddList.BackgroundColor3 = Color3.fromRGB(26, 26, 30)
+			ddList.BorderSizePixel = 0
+			ddList.ZIndex = 60
+			ddList.Visible = false
+			ddList.Parent = win.frame
+			addCorner(ddList, 6)
+			addStroke(ddList, Color3.fromRGB(60, 60, 66))
+
+			local function closeList()
+				ddList.Visible = false
+				ddBlocker.Visible = false
+			end
+			ddBlocker.MouseButton1Click:Connect(closeList)
+
+			local function openList(field, names, current, pick)
+				for _, c in ipairs(ddList:GetChildren()) do
+					if c:IsA("TextButton") then
+						c:Destroy()
+					end
+				end
+				local rowH = 26
+				for i, name in ipairs(names) do
+					local sel = name == current
+					local b = Instance.new("TextButton")
+					b.Position = UDim2.fromOffset(4, 4 + (i - 1) * rowH)
+					b.Size = UDim2.new(1, -8, 0, rowH - 2)
+					b.BackgroundColor3 = sel and Color3.fromRGB(48, 48, 55) or Color3.fromRGB(26, 26, 30)
+					b.BorderSizePixel = 0
+					b.AutoButtonColor = false
+					b.Font = Enum.Font.GothamMedium
+					b.Text = "  " .. name
+					b.TextSize = 13
+					b.TextXAlignment = Enum.TextXAlignment.Left
+					b.TextColor3 = sel and TEXT_MAIN or TEXT_SOFT
+					b.ZIndex = 61
+					b.Parent = ddList
+					addCorner(b, 5)
+					b.MouseEnter:Connect(function()
+						b.BackgroundColor3 = Color3.fromRGB(40, 40, 46)
+					end)
+					b.MouseLeave:Connect(function()
+						b.BackgroundColor3 = sel and Color3.fromRGB(48, 48, 55) or Color3.fromRGB(26, 26, 30)
+					end)
+					b.MouseButton1Click:Connect(function()
+						closeList()
+						pick(name)
+					end)
+				end
+				local h = #names * rowH + 8
+				local fp = win.frame.AbsolutePosition
+				local ap, as = field.AbsolutePosition, field.AbsoluteSize
+				local y = ap.Y - fp.Y + as.Y + 4
+				if fp.Y + y + h > win.gui.AbsoluteSize.Y - 6 then
+					y = ap.Y - fp.Y - h - 4
+				end
+				ddList.Position = UDim2.fromOffset(ap.X - fp.X, y)
+				ddList.Size = UDim2.fromOffset(as.X, h)
+				ddList.Visible = true
+				ddBlocker.Visible = true
+			end
+
+			-- ---------- section helpers: stack things top to bottom inside a panel ----------
 			local function secLabel(sec, text)
 				smallLabel(sec.f, text, 14, sec.y)
 				sec.y = sec.y + 17
 			end
 
-			local function secChoice(sec, names, initial, onPick, cols)
+			local function secDrop(sec, names, initial, pickFn)
+				local field = Instance.new("TextButton")
+				field.Position = UDim2.fromOffset(14, sec.y)
+				field.Size = UDim2.new(1, -28, 0, 26)
+				field.BackgroundColor3 = Color3.fromRGB(28, 28, 32)
+				field.BorderSizePixel = 0
+				field.AutoButtonColor = false
+				field.Font = Enum.Font.GothamMedium
+				field.Text = "  " .. initial
+				field.TextColor3 = TEXT_SOFT
+				field.TextSize = 13
+				field.TextXAlignment = Enum.TextXAlignment.Left
+				field.ZIndex = 42
+				field.Parent = sec.f
+				addCorner(field)
+				addStroke(field, FIELD_STROKE)
+
+				local caret = Instance.new("TextLabel")
+				caret.BackgroundTransparency = 1
+				caret.AnchorPoint = Vector2.new(1, 0.5)
+				caret.Position = UDim2.new(1, -8, 0.5, 0)
+				caret.Size = UDim2.fromOffset(14, 14)
+				caret.Font = Enum.Font.GothamBold
+				caret.Text = "v"
+				caret.TextColor3 = TEXT_DIM
+				caret.TextSize = 11
+				caret.ZIndex = 43
+				caret.Parent = field
+
+				local api, current = {}, initial
+				function api.Set(name)
+					if not table.find(names, name) then
+						return
+					end
+					current = name
+					field.Text = "  " .. name
+					pickFn(name)
+				end
+				field.MouseButton1Click:Connect(function()
+					if master then
+						openList(field, names, current, api.Set)
+					end
+				end)
+				sec.y = sec.y + 36
+				return api
+			end
+
+			-- 4+ options become a dropdown; fewer stay as compact buttons (force keeps buttons)
+			local function secChoice(sec, names, initial, onPick, cols, force)
+				if #names >= 4 and not force then
+					return secDrop(sec, names, initial, onPick)
+				end
 				local c = makeChoice(sec.f, 14, sec.y, names, initial, onPick, cols)
 				local rows = cols and math.ceil(#names / cols) or 1
 				sec.y = sec.y + rows * 26 + (rows - 1) * 4 + 10
@@ -2019,10 +2498,11 @@ return function(lib)
 			-- several colors: buttons pick which one the square edits
 			local function secColors(sec, stops, order, withAlpha, noDots)
 				local S
+				local cols = (#order > 4) and 3 or ((#order == 4) and 2 or nil)
 				local c = secChoice(sec, order, order[1], function(name)
 					S.Bind(slots[stops[name]])
-				end)
-				if not noDots then
+				end, cols, true)
+				if not noDots and c.buttons then
 					for name, btn in pairs(c.buttons) do
 						addDot(btn, stops[name])
 					end
@@ -2033,32 +2513,47 @@ return function(lib)
 				sec.y = sec.y + 38
 			end
 
+			local function secSlider(sec, key, lo, hi, step, initial, fmt, onChange)
+				local set = makeSlider(sec.f, 14, sec.y, lo, hi, step, initial, fmt, onChange)
+				choices[key] = {Set = set}
+				sec.y = sec.y + 38
+			end
+
 			local build = {}
 
 			build.Box = function(sec)
 				secLabel(sec, "Style")
 				choices.style = secChoice(sec, OPT.styles, opt.style, function(n) opt.style = n end)
+				secLabel(sec, "Shape (Full style)")
+				choices.boxShape = secChoice(sec, OPT.boxShapes, opt.boxShape, function(n) opt.boxShape = n end)
+				secLabel(sec, "Pulse")
+				choices.boxPulse = secChoice(sec, OPT.onoff, opt.boxPulse, function(n) opt.boxPulse = n end)
 				secLabel(sec, "Outline")
 				choices.boxOut = secChoice(sec, OPT.onoff, opt.boxOutline, function(n) opt.boxOutline = n end)
 				secColor(sec, slots.box)
 			end
 			build.Font = function(sec)
+				secLabel(sec, "Typeface")
 				choices.font = secChoice(sec, OPT.fonts, opt.font, function(n)
 					opt.font = n
 					fontValue.Text = n
-				end, 2)
+				end)
 			end
 			build.BoxFill = function(sec)
-				secLabel(sec, "Mode")
-				choices.fillMode = secChoice(sec, OPT.fillModes, opt.fillMode, function(n) opt.fillMode = n end, 2)
+				secLabel(sec, "Mode (Health = colored by health)")
+				choices.fillMode = secChoice(sec, OPT.fillModes, opt.fillMode, function(n) opt.fillMode = n end)
 				secColors(sec, {Top = "fill", Bottom = "fill2"}, {"Top", "Bottom"}, true)
 			end
 			build.Chams = function(sec)
 				secLabel(sec, "Mode")
-				choices.chamStyle = secChoice(sec, CHAM_MODES, opt.chamStyle, function(n) opt.chamStyle = n end, 2)
+				choices.chamStyle = secChoice(sec, CHAM_MODES, opt.chamStyle, function(n) opt.chamStyle = n end)
 				secLabel(sec, "Through walls")
-				choices.chamWalls = secChoice(sec, {"On", "Off"}, opt.chamWalls, function(n) opt.chamWalls = n end)
-				secColors(sec, {Fill = "chamFill", Outline = "chamOutline"}, {"Fill", "Outline"}, true)
+				choices.chamWalls = secChoice(sec, OPT.onoff, opt.chamWalls, function(n) opt.chamWalls = n end)
+				secLabel(sec, "Pulse when hit")
+				choices.chamPulse = secChoice(sec, OPT.onoff, opt.chamPulse, function(n) opt.chamPulse = n end)
+				secLabel(sec, "Outline thickness")
+				choices.chamThick = secChoice(sec, OPT.chamThicks, opt.chamThick, function(n) opt.chamThick = n end)
+				secColors(sec, {Fill = "chamFill", Outline = "chamOutline", Pulse = "chamPulse"}, {"Fill", "Outline", "Pulse"}, true)
 			end
 			build.Name = function(sec)
 				secLabel(sec, "Show")
@@ -2066,11 +2561,19 @@ return function(lib)
 				secColor(sec, slots.name)
 			end
 			build.Health = function(sec)
-				secLabel(sec, "Mode")
+				secLabel(sec, "Position")
+				choices.hpSide = secChoice(sec, OPT.sides, opt.hpSide, function(n) opt.hpSide = n end)
+				secLabel(sec, "Color mode")
 				choices.hpMode = secChoice(sec, {"Solid", "Gradient"}, opt.hpMode, function(n) opt.hpMode = n end)
 				secLabel(sec, "Ghost bar")
 				choices.hpGhost = secChoice(sec, OPT.onoff, opt.hpGhost, function(n) opt.hpGhost = n end)
-				secColors(sec, {Full = "hpFull", Mid = "hpMid", Low = "hpLow", Ghost = "ghost"}, {"Full", "Mid", "Low", "Ghost"}, false)
+				secLabel(sec, "Overheal bar")
+				choices.overheal = secChoice(sec, OPT.onoff, opt.overheal, function(n) opt.overheal = n end)
+				secLabel(sec, "Shield bar")
+				choices.shield = secChoice(sec, OPT.onoff, opt.shield, function(n) opt.shield = n end)
+				secColors(sec,
+					{Full = "hpFull", Mid = "hpMid", Low = "hpLow", Ghost = "ghost", Overheal = "overheal", Shield = "shield"},
+					{"Full", "Mid", "Low", "Ghost", "Overheal", "Shield"}, false)
 			end
 			build.Armor = function(sec)
 				secColor(sec, slots.armor, false)
@@ -2099,24 +2602,12 @@ return function(lib)
 			end
 			build.LookDir = function(sec)
 				secLabel(sec, "Length")
-				local set = makeSlider(sec.f, 14, sec.y, 1, 20, 1, opt.lookLen, function(v)
-					return v .. " studs"
-				end, function(v)
-					opt.lookLen = v
-				end)
-				choices.lookLen = {Set = set}
-				sec.y = sec.y + 38
+				secSlider(sec, "lookLen", 1, 20, 1, opt.lookLen, function(v) return v .. " studs" end, function(v) opt.lookLen = v end)
 				secColor(sec, slots.look)
 			end
 			build.VelLine = function(sec)
 				secLabel(sec, "Max length")
-				local set = makeSlider(sec.f, 14, sec.y, 2, 14, 1, opt.velLen, function(v)
-					return v .. " studs"
-				end, function(v)
-					opt.velLen = v
-				end)
-				choices.velLen = {Set = set}
-				sec.y = sec.y + 38
+				secSlider(sec, "velLen", 2, 14, 1, opt.velLen, function(v) return v .. " studs" end, function(v) opt.velLen = v end)
 				secLabel(sec, "Arrowhead")
 				choices.velArrow = secChoice(sec, OPT.onoff, opt.velArrow, function(n) opt.velArrow = n end)
 				secColor(sec, slots.vel)
@@ -2131,13 +2622,7 @@ return function(lib)
 				secLabel(sec, "Width")
 				choices.trailWidth = secChoice(sec, {"Thin", "Normal", "Thick"}, "Normal", function(n) opt.trailWidth = OPT.trailWidths[n] end)
 				secLabel(sec, "Length")
-				local set = makeSlider(sec.f, 14, sec.y, 0.5, 4, 0.5, opt.trailLife, function(v)
-					return v .. " sec"
-				end, function(v)
-					opt.trailLife = v
-				end)
-				choices.trailLife = {Set = set}
-				sec.y = sec.y + 38
+				secSlider(sec, "trailLife", 0.5, 4, 0.5, opt.trailLife, function(v) return v .. " sec" end, function(v) opt.trailLife = v end)
 				secColors(sec, {Head = "trail", Tail = "trail2"}, {"Head", "Tail"}, true)
 			end
 			build.Tracers = function(sec)
@@ -2165,6 +2650,26 @@ return function(lib)
 				choices.dmgHeals = secChoice(sec, OPT.onoff, opt.dmgHeals, function(n) opt.dmgHeals = n end)
 				secColors(sec, {Damage = "dmg", Heal = "heal"}, {"Damage", "Heal"}, false)
 			end
+			build.HitMarker = function(sec)
+				secLabel(sec, "Style")
+				choices.hitStyle = secChoice(sec, OPT.hitStyles, opt.hitStyle, function(n) opt.hitStyle = n end)
+				secLabel(sec, "Duration")
+				choices.hitDur = secChoice(sec, OPT.dmgSpeeds, opt.hitDur, function(n) opt.hitDur = n end)
+				secLabel(sec, "Position")
+				choices.hitAnchor = secChoice(sec, OPT.hitAnchors, opt.hitAnchor, function(n) opt.hitAnchor = n end)
+				secLabel(sec, "Size")
+				secSlider(sec, "hitSize", 4, 20, 1, opt.hitSize, function(v) return v .. " px" end, function(v) opt.hitSize = v end)
+				secColors(sec, {Hit = "hit", Kill = "kill"}, {"Hit", "Kill"}, false)
+			end
+			build.Footsteps = function(sec)
+				secLabel(sec, "Max radius")
+				secSlider(sec, "stepRadius", 3, 12, 1, opt.stepRadius, function(v) return v .. " studs" end, function(v) opt.stepRadius = v end)
+				secLabel(sec, "Duration")
+				secSlider(sec, "stepLife", 0.5, 3, 0.25, opt.stepLife, function(v) return v .. " sec" end, function(v) opt.stepLife = v end)
+				secLabel(sec, "Include yourself")
+				choices.stepSelf = secChoice(sec, OPT.onoff, opt.stepSelf, function(n) opt.stepSelf = n end)
+				secColor(sec, slots.step)
+			end
 			build.TeamColors = function(sec)
 				secLabel(sec, "Source")
 				choices.teamSource = secChoice(sec, {"Custom", "Roblox"}, opt.teamSource, function(n) opt.teamSource = n end)
@@ -2178,8 +2683,8 @@ return function(lib)
 				local it = items[key]
 				local sec = {f = it.drop, y = 10, item = it}
 				fn(sec)
-				it.dropH = sec.y
-				it.drop.Size = UDim2.new(1, 0, 0, sec.y)
+				it.dropH = sec.y + 6
+				it.drop.Size = UDim2.new(1, 0, 0, it.dropH)
 			end
 			layoutDirty = true
 
@@ -2193,8 +2698,11 @@ return function(lib)
 					popRefresh()
 					refreshDots()
 				end,
-				-- close the color window when its dropdown closes / the tab changes / the menu locks
+				-- close floating windows when the menu locks / the tab changes / the panel closes
 				update = function()
+					if ddList.Visible and not (master and page.Visible) then
+						closeList()
+					end
 					if pop.Visible then
 						local o = PK.owner
 						if not (master and page.Visible and o and o.item and o.item.open) then
@@ -2205,6 +2713,8 @@ return function(lib)
 				destroy = function()
 					pop:Destroy()
 					blocker:Destroy()
+					ddList:Destroy()
+					ddBlocker:Destroy()
 				end,
 			}
 		end
@@ -2239,57 +2749,6 @@ return function(lib)
 			return mid:Lerp(hi, (t - 0.5) * 2)
 		end
 
-		local function armorColor(t)
-			return colorOf(slots.armor)
-		end
-
-		local hpRects, armRects = {}, {}
-		for i = 1, HP_SEGS do
-			hpRects[i] = {0, 0, 0, 0, Color3.new(1, 1, 1)}
-			armRects[i] = {0, 0, 0, 0, Color3.new(1, 1, 1)}
-		end
-		local hpBg = {0, 0, 0, 0}
-		local armBg = {0, 0, 0, 0}
-		local hpInfo = {x = 0, y = 0, bx = 0, bottom = 0, H = 1}
-		local armInfo = {x = 0, y = 0}
-		local ghostRect = {0, 0, 0, 0}
-
-		-- health bar on the left of the box
-		local function computeHealth(frac)
-			local top = math.floor(bnd.minY - PAD)
-			local bottom = math.floor(bnd.maxY + PAD)
-			local H = bottom - top
-			local x = math.floor(bnd.minX - PAD - 3 - HP_W)
-			hpBg[1], hpBg[2], hpBg[3], hpBg[4] = x - 1, top - 1, HP_W + 2, H + 2
-			hpInfo.x = x - 1
-			hpInfo.y = bottom - H * math.max(frac, 0)
-			hpInfo.bx, hpInfo.bottom, hpInfo.H = x, bottom, H
-			return fillBar(hpRects, x, bottom, H, HP_W, frac, healthColor, opt.hpMode == "Gradient")
-		end
-
-		-- the part of the bar that was just lost (between the current health and the ghost value)
-		local function computeGhost(frac, gf)
-			ghostRect[1] = hpInfo.bx
-			ghostRect[2] = hpInfo.bottom - hpInfo.H * gf
-			ghostRect[3] = HP_W
-			ghostRect[4] = hpInfo.H * (gf - frac)
-		end
-
-		-- armor bar: same side as the health bar, next to it (takes its place when the health bar is off)
-		local function computeArmor(frac)
-			local top = math.floor(bnd.minY - PAD)
-			local bottom = math.floor(bnd.maxY + PAD)
-			local H = bottom - top
-			local x = math.floor(bnd.minX - PAD - 3 - HP_W)
-			if feat.Health then
-				x = x - (HP_W + 3)
-			end
-			armBg[1], armBg[2], armBg[3], armBg[4] = x - 1, top - 1, HP_W + 2, H + 2
-			armInfo.x = x - 1
-			armInfo.y = bottom - H * math.max(frac, 0)
-			return fillBar(armRects, x, bottom, H, HP_W, frac, armorColor, false)
-		end
-
 		local function tracerOrigin(w, h, mouse)
 			if opt.tracerFrom == "Center" then
 				return w / 2, h / 2
@@ -2305,14 +2764,16 @@ return function(lib)
 		-- preview on the 3D avatar render
 		-- ====================================================
 		local previewViewport
-		local prevBox, prevBoxOut, prevSkel, prevJoint, prevHp, prevTrc = {}, {}, {}, {}, {}, {}
-		local prevFill, prevArmor, prevLook, prevVel, prevGhost, prevTrail = {}, {}, {}, {}, {}, {}
+		local prevBox, prevBoxOut, prevSkel, prevJoint, prevTrc = {}, {}, {}, {}, {}
+		local prevFill, prevLook, prevGhost, prevHit, prevRing = {}, {}, {}, {}, {}
+		local prevBars = {hp = {}, ov = {}, sh = {}, arm = {}}
 		local prevTexts = {}
 		local prevStatus = {}
 		local prevGhostState = {}
-		local prevHpState = {target = 1, shown = 1, nextHit = 0}
+		local prevHpState = {target = 1, shown = 1, nextHit = 0, hitAt = -10}
 		local prevDmg = {}
 		local prevDot, prevDotStroke
+		local prevChamState = {shells = {}}
 
 		local function findViewport()
 			if previewViewport and previewViewport.Parent then
@@ -2339,12 +2800,12 @@ return function(lib)
 			return f
 		end
 
-		-- velocity line + trail in the preview are real 3D parts inside the viewport,
-		-- so the avatar covers whatever is behind it (flat overlay frames can't do that)
+		-- velocity line + trail + chams in the preview are real 3D parts inside the viewport,
+		-- so the avatar covers whatever is behind them
 		local folder3D
 		local velParts, trailParts = {}, {}
 
-		local function get3D(pool, i)
+		local function ensure3D()
 			if not (folder3D and folder3D.Parent == previewViewport) then
 				folder3D = previewViewport:FindFirstChild("EspPreview3D")
 				if not folder3D then
@@ -2353,6 +2814,11 @@ return function(lib)
 					folder3D.Parent = previewViewport
 				end
 			end
+			return folder3D
+		end
+
+		local function get3D(pool, i)
+			local folder = ensure3D()
 			local part = pool[i]
 			if not part or not part.Parent then
 				part = Instance.new("Part")
@@ -2367,8 +2833,8 @@ return function(lib)
 				part.Size = Vector3.new(0.05, 0.05, 0.05)
 				pool[i] = part
 			end
-			if part.Parent ~= folder3D then
-				part.Parent = folder3D
+			if part.Parent ~= folder then
+				part.Parent = folder
 			end
 			return part
 		end
@@ -2382,9 +2848,9 @@ return function(lib)
 		local function hide3D()
 			hide3DPool(velParts, 1)
 			hide3DPool(trailParts, 1)
+			Chams.previewClear(prevChamState)
 		end
 
-		-- a thin box between two world points
 		local function place3D(pool, i, a, b, color, opacity, thick)
 			local part = get3D(pool, i)
 			local len = (b - a).Magnitude
@@ -2398,7 +2864,7 @@ return function(lib)
 			part.Transparency = 1 - opacity
 		end
 
-		-- how many screen pixels one stud is worth near `at` (keeps the 3D lines the same width as the real ones)
+		-- how many screen pixels one stud is worth near `at`
 		local function pxPerStud(project, at)
 			local _, y1, v1 = project(at)
 			local _, y2, v2 = project(at + Vector3.new(0, 1, 0))
@@ -2432,15 +2898,18 @@ return function(lib)
 			hidePool(prevBoxOut)
 			hidePool(prevSkel)
 			hidePool(prevJoint)
-			hidePool(prevHp)
 			hidePool(prevTrc)
 			hidePool(prevFill)
-			hidePool(prevArmor)
 			hidePool(prevLook)
-			hidePool(prevVel)
 			hidePool(prevGhost)
-			hidePool(prevTrail)
-			hide3D()
+			hidePool(prevHit)
+			hidePool(prevRing)
+			for _, pool in pairs(prevBars) do
+				hidePool(pool)
+			end
+			if previewViewport then
+				hide3D()
+			end
 			hideDotPreview()
 			for key in pairs(prevTexts) do
 				hidePreviewText(key)
@@ -2523,26 +2992,6 @@ return function(lib)
 			end
 		end
 
-		-- segments with their own color / opacity / thickness: {x1, y1, x2, y2, color, opacity, thickness}
-		local function drawSegPool(pool, count, list, z)
-			for i = 1, count do
-				local l = getFrame(pool, i, "EspTrail", z)
-				local sg = list[i]
-				local dx, dy = sg[3] - sg[1], sg[4] - sg[2]
-				local len = math.sqrt(dx * dx + dy * dy)
-				l.AnchorPoint = Vector2.new(0.5, 0.5)
-				l.BackgroundColor3 = sg[5]
-				l.BackgroundTransparency = 1 - sg[6]
-				l.Position = UDim2.fromOffset((sg[1] + sg[3]) / 2, (sg[2] + sg[4]) / 2)
-				l.Size = UDim2.fromOffset(len + sg[7], sg[7])
-				l.Rotation = math.deg(math.atan2(dy, dx))
-				l.Visible = true
-			end
-			for i = count + 1, #pool do
-				pool[i].Visible = false
-			end
-		end
-
 		-- round dots on the skeleton joints
 		local function drawJointPreview(count, c, a, r)
 			for i = 1, count do
@@ -2565,7 +3014,7 @@ return function(lib)
 			end
 		end
 
-		-- pool[1] = background, pool[2..] = the colored pieces (health and armor bars)
+		-- pool[1] = background, pool[2..] = the colored pieces
 		local function drawBarPreview(pool, bgRect, rects, count, show)
 			if not show then
 				hidePool(pool)
@@ -2611,7 +3060,7 @@ return function(lib)
 		end
 
 		-- gradient box fill: one frame + a UIGradient (colors and opacity)
-		local function drawFillPreview(c1, a1, c2, a2)
+		local function drawFillPreview(c1, a1, c2, a2, mode)
 			local f = getFrame(prevFill, 1, "EspFill", 18)
 			f.AnchorPoint = Vector2.new(0, 0)
 			f.Rotation = 0
@@ -2625,7 +3074,6 @@ return function(lib)
 				g.Rotation = 90
 				g.Parent = f
 			end
-			local mode = opt.fillMode
 			if mode == "Fade Down" then
 				g.Color = ColorSequence.new(c1)
 				g.Transparency = NumberSequence.new(1 - a1, 1)
@@ -2640,10 +3088,6 @@ return function(lib)
 				g.Transparency = NumberSequence.new(1 - a1)
 			end
 			f.Visible = true
-		end
-
-		local function easeOut(t)
-			return 1 - (1 - t) * (1 - t) * (1 - t)
 		end
 
 		local function updatePreview()
@@ -2670,14 +3114,14 @@ return function(lib)
 			local hasB = (needsBounds() or feat.LookDir) and computeBounds(model, project)
 			local cx = (bnd.minX + bnd.maxX) / 2
 
-			-- visibility colors: the preview flips between "visible" and "hidden" so both can be seen
+			-- visibility colors: the preview flips between "visible" and "hidden"
 			if feat.VisColors then
 				curVis = math.floor(now / 2.2) % 2 == 0
 			else
 				curVis = nil
 			end
 
-			-- demo health: a few hits, then a heal (also drives the ghost bar and the damage numbers)
+			-- demo health: a few hits, then a heal (drives the ghost bar, damage numbers, cham pulse, hit marker)
 			local ps = prevHpState
 			if now >= ps.nextHit then
 				local before = ps.target
@@ -2688,6 +3132,9 @@ return function(lib)
 				end
 				ps.nextHit = now + 1.7
 				local delta = math.floor((before - ps.target) * 100 + 0.5)
+				if delta > 0 then
+					ps.hitAt = now
+				end
 				if delta ~= 0 and (delta > 0 or opt.dmgHeals == "On") then
 					table.insert(prevDmg, {t0 = now, amt = math.abs(delta), heal = delta < 0, dx = math.random(-12, 12)})
 					if #prevDmg > 3 then
@@ -2698,21 +3145,48 @@ return function(lib)
 			ps.shown = approach(ps.shown, ps.target, frameDt, 7, 0.002)
 			local frac = math.clamp(ps.shown, 0.05, 1)
 
+			-- chams (shell parts in the viewport)
+			if feat.Chams then
+				Chams.preview(model, ensure3D(), {
+					mode = opt.chamStyle,
+					fill = colorFor(slots.chamFill, nil, true),
+					outline = colorOf(slots.chamOutline),
+					fillA = slots.chamFill.a,
+					outA = slots.chamOutline.a,
+					pulse = (opt.chamPulse == "On") and math.clamp(1 - (now - ps.hitAt) / 0.5, 0, 1) or 0,
+					pulseColor = colorOf(slots.chamPulse),
+					thick = CHAM_THICK[opt.chamThick] or 0,
+				}, prevChamState)
+			else
+				Chams.previewClear(prevChamState)
+			end
+
+			-- box fill
 			if feat.BoxFill and hasB then
 				local c1 = colorFor(slots.fill, nil, true)
+				local mode = opt.fillMode
+				if mode == "Health" then
+					if not (feat.VisColors and curVis ~= nil) then
+						c1 = healthColor(frac)
+					end
+					mode = "Solid"
+				end
 				local c2 = colorOverridden() and c1:Lerp(Color3.new(0, 0, 0), 0.55) or colorOf(slots.fill2)
-				drawFillPreview(c1, slots.fill.a, c2, slots.fill2.a)
+				drawFillPreview(c1, slots.fill.a, c2, slots.fill2.a, mode)
 			else
 				hidePool(prevFill)
 			end
 
-			local n = feat.Box and computeBox(model, project, opt.style, hasB) or 0
+			-- box (shape + pulse)
+			local pm = opt.boxPulse == "On" and pulseMul(now) or 1
+			local n = feat.Box and computeBox(model, project, opt.style, hasB, opt.boxShape) or 0
 			if feat.Box and opt.boxOutline == "On" then
-				drawLinePool(prevBoxOut, n, segs, OUTLINE_COLOR, 0.8, THICKNESS + 2, 19)
+				drawLinePool(prevBoxOut, n, segs, OUTLINE_COLOR, 0.8 * pm, THICKNESS + 2, 19)
 			else
 				hidePool(prevBoxOut)
 			end
-			drawLinePool(prevBox, n, segs, colorFor(slots.box, nil, true), slots.box.a, THICKNESS)
+			drawLinePool(prevBox, n, segs, colorFor(slots.box, nil, true), slots.box.a * pm,
+				THICKNESS * (opt.boxPulse == "On" and (0.85 + 0.35 * pm) or 1))
 
 			local jn = 0
 			n = 0
@@ -2746,7 +3220,7 @@ return function(lib)
 			end
 			drawLinePool(prevLook, n, lookSeg, colorFor(slots.look, nil, true), slots.look.a, 1.5)
 
-			-- velocity line + movement trail, drawn as 3D parts that follow the way the avatar faces
+			-- velocity line + movement trail: 3D parts that follow the way the avatar faces
 			local rootPart = model:FindFirstChild("HumanoidRootPart") or model:FindFirstChild("UpperTorso") or model:FindFirstChild("Torso")
 			local fwd = Vector3.new(0, 0, -1)
 			if rootPart then
@@ -2808,7 +3282,6 @@ return function(lib)
 			end
 			hide3DPool(trailParts, tn + 1)
 
-
 			if feat.HeadDot then
 				local hx, hy, hr = computeHead(model, project)
 				if hx then
@@ -2827,57 +3300,123 @@ return function(lib)
 			end
 			drawLinePool(prevTrc, n, tracerSeg, colorFor(slots.trc, nil, true), slots.trc.a, 1)
 
-			-- armor first: it sits next to the health bar (or in its place)
-			local armBarOn = feat.Armor and hasB
-			local armFrac = 0.6 + 0.4 * math.sin(now * 0.7 + 1.5)
-			local armN = 0
-			if (feat.Armor or feat.ArmorText) and hasB then
-				armN = computeArmor(armFrac)
+			-- footstep ring demo: a ring keeps expanding under the avatar's feet
+			if feat.Footsteps and rootPart then
+				local age = (now % opt.stepLife) / opt.stepLife
+				local rn = computeRing(rootPart.Position - Vector3.new(0, 2.9, 0),
+					0.6 + easeOut(age) * (math.min(opt.stepRadius, 6) - 0.6), project)
+				drawLinePool(prevRing, rn, ringSeg, colorFor(slots.step, nil, true), slots.step.a * (1 - age) ^ 1.5, 1.5)
+			else
+				hidePool(prevRing)
 			end
-			drawBarPreview(prevArmor, armBg, armRects, armN, armBarOn)
 
-			local hpTextW = 0
-			if (feat.Health or feat.HealthText) and hasB then
-				drawBarPreview(prevHp, hpBg, hpRects, computeHealth(frac), feat.Health)
-				if feat.Health and opt.hpGhost == "On" then
-					local gf = stepGhost(prevGhostState, frac, frameDt)
-					if gf - frac > 0.004 then
-						computeGhost(frac, gf)
-						drawGhostPreview(true)
+			-- hit marker demo: shows on every demo hit
+			local hitDur = HIT_DUR[opt.hitDur] or 0.5
+			if feat.HitMarker and now - ps.hitAt < hitDur then
+				local age = (now - ps.hitAt) / hitDur
+				local mx, my = vpSize.X / 2, vpSize.Y / 2
+				if hasB then
+					mx, my = cx, (bnd.minY + bnd.maxY) / 2
+				end
+				computeHit(mx, my, opt.hitSize, opt.hitStyle, 1 + 0.35 * math.max(0, 1 - age * 5))
+				local a = (age < 0.5 and 1 or 1 - (age - 0.5) / 0.5) * slots.hit.a
+				drawLinePool(prevHit, 4, hitSeg, colorOf(slots.hit), a, 2)
+			else
+				hidePool(prevHit)
+			end
+
+			-- ================= bars (same layout code as the real ESP) =================
+			local side, idx, lastKey = opt.hpSide, 0, nil
+
+			if hasB and (feat.Health or feat.HealthText) then
+				local cnt = computeBar("hp", side, idx, frac, healthColor, opt.hpMode == "Gradient")
+				if feat.Health then
+					drawBarPreview(prevBars.hp, barBg.hp, barRects.hp, cnt, true)
+					if opt.hpGhost == "On" then
+						local gf = stepGhost(prevGhostState, frac, frameDt)
+						if gf - frac > 0.004 then
+							computeGhost(frac, gf)
+							drawGhostPreview(true)
+						else
+							drawGhostPreview(false)
+						end
 					else
 						drawGhostPreview(false)
 					end
+					idx, lastKey = idx + 1, "hp"
 				else
+					hidePool(prevBars.hp)
 					drawGhostPreview(false)
 				end
-				if feat.HealthText then
-					local str = (opt.hpFormat == "Percent") and (math.floor(frac * 100 + 0.5) .. "%") or tostring(math.floor(frac * 100 + 0.5))
-					hpTextW = #str * 6.5
-					local edge = armBarOn and armInfo.x or hpInfo.x
-					showPreviewText("hpText", str, edge - 3, hpInfo.y, 1, 0.5, colorOf(slots.hpText), slots.hpText.a, opt.font)
-				else
-					hidePreviewText("hpText")
-				end
 			else
-				hidePool(prevHp)
+				hidePool(prevBars.hp)
 				drawGhostPreview(false)
-				hidePreviewText("hpText")
 			end
 
-			if feat.ArmorText and hasB then
+			if hasB and feat.Health and opt.overheal == "On" then
+				local c = colorOf(slots.overheal)
+				local cnt = computeBar("ov", side, idx, 0.35 + 0.35 * math.sin(now * 1.1), function() return c end, false)
+				drawBarPreview(prevBars.ov, barBg.ov, barRects.ov, cnt, true)
+				idx, lastKey = idx + 1, "ov"
+			else
+				hidePool(prevBars.ov)
+			end
+
+			if hasB and feat.Health and opt.shield == "On" then
+				local c = colorOf(slots.shield)
+				local cnt = computeBar("sh", side, idx, 0.45 + 0.4 * math.sin(now * 0.9), function() return c end, false)
+				drawBarPreview(prevBars.sh, barBg.sh, barRects.sh, cnt, true)
+				idx, lastKey = idx + 1, "sh"
+			else
+				hidePool(prevBars.sh)
+			end
+
+			local armFrac = 0.6 + 0.4 * math.sin(now * 0.7 + 1.5)
+			if hasB and (feat.Armor or feat.ArmorText) then
+				local c = colorOf(slots.armor)
+				local cnt = computeBar("arm", side, idx, armFrac, function() return c end, false)
+				if feat.Armor then
+					drawBarPreview(prevBars.arm, barBg.arm, barRects.arm, cnt, true)
+					idx, lastKey = idx + 1, "arm"
+				else
+					hidePool(prevBars.arm)
+				end
+			else
+				hidePool(prevBars.arm)
+			end
+
+			-- texts sit outside the whole bar stack
+			local edge = barInfo[lastKey or "hp"]
+			local horizSide = side == "Left" or side == "Right"
+			local hpExtra = 0
+			if hasB and feat.HealthText then
+				local str = (opt.hpFormat == "Percent") and (math.floor(frac * 100 + 0.5) .. "%") or tostring(math.floor(frac * 100 + 0.5))
+				local tw, th = #str * 6.5, 13
+				local x, y = textPos(edge, barInfo.hp, tw, th, 0)
+				showPreviewText("hpText", str, x, y, 0.5, 0, colorOf(slots.hpText), slots.hpText.a, opt.font)
+				hpExtra = horizSide and (tw + 4) or (th + 1)
+			else
+				hidePreviewText("hpText")
+			end
+			if hasB and feat.ArmorText then
 				local str = (opt.armFormat == "Percent") and (math.floor(armFrac * 100 + 0.5) .. "%") or tostring(math.floor(armFrac * ARMOR_MAX + 0.5))
-				local ax = armInfo.x - 3 - ((hpTextW > 0) and (hpTextW + 4) or 0)
-				showPreviewText("armText", str, ax, armInfo.y, 1, 0.5, colorOf(slots.armText), slots.armText.a, opt.font)
+				local tw, th = #str * 6.5, 13
+				local x, y = textPos(edge, barInfo.arm, tw, th, hpExtra)
+				showPreviewText("armText", str, x, y, 0.5, 0, colorOf(slots.armText), slots.armText.a, opt.font)
 			else
 				hidePreviewText("armText")
 			end
+
+			local barRoom = idx > 0 and (3 + idx * BAR_STEP) or 0
+			local topRoom = side == "Top" and barRoom or 0
+			local bottomRoom = side == "Bottom" and barRoom or 0
 
 			if feat.Name and hasB then
 				local str = nameText(LocalPlayer)
 				if distanceOnName() then
 					str = str .. " " .. distanceText(25)
 				end
-				showPreviewText("name", str, cx, bnd.minY - PAD - 2, 0.5, 1, colorFor(slots.name, nil), slots.name.a, opt.font)
+				showPreviewText("name", str, cx, bnd.minY - PAD - 2 - topRoom, 0.5, 1, colorFor(slots.name, nil), slots.name.a, opt.font)
 			else
 				hidePreviewText("name")
 			end
@@ -2890,7 +3429,7 @@ return function(lib)
 				hidePreviewText("status")
 			end
 
-			local by = bnd.maxY + PAD + 2
+			local by = bnd.maxY + PAD + 2 + bottomRoom
 			if feat.Weapon and hasB then
 				showPreviewText("weapon", "Weapon", cx, by, 0.5, 0, colorFor(slots.weapon, nil), slots.weapon.a, opt.font)
 				by = by + LINE_H
@@ -3004,17 +3543,17 @@ return function(lib)
 				look = {}, lookShown = 0,
 				vel = {}, velShown = 0,
 				trailLines = {}, trailShown = 0, trail = nil,
-				hp = {}, hpShown = 0, hpBg = nil, hpBgOn = false,
+				bars = {},
 				ghostSq = nil, ghostOn = false, ghost = nil,
-				arm = {}, armShown = 0, armBg = nil, armBgOn = false,
 				dot = nil, dotOn = false,
 				arrow = nil, arrowOn = false,
 				cham = nil,
 				fillList = {}, fillShown = 0,
 				text = {}, textOn = {}, textFont = {},
 				status = {},
-				hpVal = nil, armVal = nil,
+				hpVal = nil, armVal = nil, ovVal = nil, shVal = nil,
 				lastHp = nil, lastChar = nil,
+				hitAt = -10, stepAcc = 0,
 				visAt = 0, visVal = true,
 			}
 		end
@@ -3028,13 +3567,17 @@ return function(lib)
 			if not rec then
 				return
 			end
-			for _, list in ipairs({rec.box, rec.boxOut, rec.skel, rec.joint, rec.trc, rec.look, rec.vel, rec.trailLines, rec.hp, rec.arm, rec.fillList}) do
+			for _, list in ipairs({rec.box, rec.boxOut, rec.skel, rec.joint, rec.trc, rec.look, rec.vel, rec.trailLines, rec.fillList}) do
 				for _, obj in ipairs(list) do
 					kill(obj)
 				end
 			end
-			if rec.hpBg then kill(rec.hpBg) end
-			if rec.armBg then kill(rec.armBg) end
+			for _, b in pairs(rec.bars) do
+				for _, obj in ipairs(b.list) do
+					kill(obj)
+				end
+				if b.bg then kill(b.bg) end
+			end
 			if rec.ghostSq then kill(rec.ghostSq) end
 			if rec.dot then kill(rec.dot) end
 			if rec.arrow then kill(rec.arrow) end
@@ -3065,22 +3608,28 @@ return function(lib)
 			end
 		end
 
-		local function hideHpBar(rec)
-			hideShown(rec.hp, rec.hpShown)
-			rec.hpShown = 0
-			if rec.hpBgOn then
-				rec.hpBg.Visible = false
-				rec.hpBgOn = false
+		-- bars: one entry per kind (hp / ov / sh / arm) with its own squares and background
+		local function barState(rec, key)
+			local b = rec.bars[key]
+			if not b then
+				b = {list = {}, shown = 0, bgOn = false}
+				rec.bars[key] = b
 			end
-			hideGhost(rec)
+			return b
 		end
 
-		local function hideArmBar(rec)
-			hideShown(rec.arm, rec.armShown)
-			rec.armShown = 0
-			if rec.armBgOn then
-				rec.armBg.Visible = false
-				rec.armBgOn = false
+		local function hideBarK(rec, key)
+			local b = rec.bars[key]
+			if b then
+				hideShown(b.list, b.shown)
+				b.shown = 0
+				if b.bgOn then
+					b.bg.Visible = false
+					b.bgOn = false
+				end
+			end
+			if key == "hp" then
+				hideGhost(rec)
 			end
 		end
 
@@ -3105,9 +3654,11 @@ return function(lib)
 			rec.trail = nil
 			hideShown(rec.fillList, rec.fillShown)
 			rec.fillShown = 0
-			hideHpBar(rec)
-			hideArmBar(rec)
-			rec.hpVal, rec.armVal, rec.ghost = nil, nil, nil
+			for key in pairs(rec.bars) do
+				hideBarK(rec, key)
+			end
+			hideGhost(rec)
+			rec.hpVal, rec.armVal, rec.ovVal, rec.shVal, rec.ghost = nil, nil, nil, nil, nil
 			if rec.dotOn then
 				rec.dot.Visible = false
 				rec.dotOn = false
@@ -3194,7 +3745,7 @@ return function(lib)
 			return count
 		end
 
-		-- colored pieces of a bar (health / armor)
+		-- colored pieces of a bar
 		local function setSquares(list, prevShown, count, rects)
 			while #list < count do
 				table.insert(list, newSquare(4))
@@ -3232,17 +3783,19 @@ return function(lib)
 			return count
 		end
 
-		local function drawBarBg(rec, key, onKey, rect)
-			if not rec[key] then
-				rec[key] = newSquare(2)
-				rec[key].Color = Color3.fromRGB(10, 10, 12)
+		local function drawBarK(rec, key, count)
+			local b = barState(rec, key)
+			if not b.bg then
+				b.bg = newSquare(2)
+				b.bg.Color = Color3.fromRGB(10, 10, 12)
 			end
-			local bg = rec[key]
-			bg.Transparency = dAlpha(0.7 * curFade)
-			bg.Position = Vector2.new(rect[1], rect[2])
-			bg.Size = Vector2.new(rect[3], rect[4])
-			bg.Visible = true
-			rec[onKey] = true
+			local r = barBg[key]
+			b.bg.Transparency = dAlpha(0.7 * curFade)
+			b.bg.Position = Vector2.new(r[1], r[2])
+			b.bg.Size = Vector2.new(r[3], r[4])
+			b.bg.Visible = true
+			b.bgOn = true
+			b.shown = setSquares(b.list, b.shown, count, barRects[key])
 		end
 
 		local function drawGhost(rec)
@@ -3379,9 +3932,124 @@ return function(lib)
 		end
 
 		-- ====================================================
-		-- per player
+		-- hit markers + footstep rings
 		-- ====================================================
-		local function updatePlayer(player, camera, project, camPos, vs, ox, oy)
+		local hits, rings, hitLines, ringLines = {}, {}, {}, {}
+		local lastShot = -10
+
+		-- a health drop within HIT_WINDOW of your click counts as your hit
+		local shotConn = UserInputService.InputBegan:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+				lastShot = os.clock()
+			end
+		end)
+
+		local function spawnHit(pos, killed)
+			table.insert(hits, {t0 = os.clock(), pos = pos, kill = killed})
+			if #hits > HIT_MAX then
+				table.remove(hits, 1)
+			end
+		end
+
+		local function spawnRing(pos, color)
+			table.insert(rings, {t0 = os.clock(), pos = pos, color = color})
+			if #rings > RING_MAX then
+				table.remove(rings, 1)
+			end
+		end
+
+		local function hideLines(list)
+			for _, l in ipairs(list) do
+				l.Visible = false
+			end
+		end
+
+		local function updateHits(project, vs)
+			if not feat.HitMarker then
+				table.clear(hits)
+				hideLines(hitLines)
+				return
+			end
+			local dur, now, k = HIT_DUR[opt.hitDur] or 0.5, os.clock(), 0
+			for i = #hits, 1, -1 do
+				if now - hits[i].t0 >= dur then
+					table.remove(hits, i)
+				end
+			end
+			for _, h in ipairs(hits) do
+				local age = (now - h.t0) / dur
+				local cx, cy, vis = vs.X / 2, vs.Y / 2, true
+				if opt.hitAnchor == "Target" then
+					cx, cy, vis = project(h.pos)
+				end
+				if vis then
+					computeHit(cx, cy, opt.hitSize, opt.hitStyle, 1 + 0.35 * math.max(0, 1 - age * 5))
+					local col = h.kill and colorOf(slots.kill) or colorOf(slots.hit)
+					local a = (age < 0.5 and 1 or 1 - (age - 0.5) / 0.5) * slots.hit.a
+					for i = 1, 4 do
+						k = k + 1
+						local l = hitLines[k]
+						if not l then
+							l = newLine(7)
+							hitLines[k] = l
+						end
+						local s = hitSeg[i]
+						l.From = Vector2.new(s[1], s[2])
+						l.To = Vector2.new(s[3], s[4])
+						l.Color = col
+						l.Thickness = 2
+						l.Transparency = dAlpha(a)
+						l.Visible = true
+					end
+				end
+			end
+			for i = k + 1, #hitLines do
+				hitLines[i].Visible = false
+			end
+		end
+
+		local function updateRings(project)
+			if not feat.Footsteps then
+				table.clear(rings)
+				hideLines(ringLines)
+				return
+			end
+			local life, now, k = opt.stepLife, os.clock(), 0
+			for i = #rings, 1, -1 do
+				if now - rings[i].t0 >= life then
+					table.remove(rings, i)
+				end
+			end
+			for _, r in ipairs(rings) do
+				local age = (now - r.t0) / life
+				local radius = 0.6 + easeOut(age) * (opt.stepRadius - 0.6)
+				local a = (1 - age) ^ 1.5 * slots.step.a
+				local n = computeRing(r.pos, radius, project)
+				for i = 1, n do
+					k = k + 1
+					local l = ringLines[k]
+					if not l then
+						l = newLine(2)
+						ringLines[k] = l
+					end
+					local s = ringSeg[i]
+					l.From = Vector2.new(s[1], s[2])
+					l.To = Vector2.new(s[3], s[4])
+					l.Color = r.color
+					l.Thickness = 1.5
+					l.Transparency = dAlpha(a)
+					l.Visible = true
+				end
+			end
+			for i = k + 1, #ringLines do
+				ringLines[i].Visible = false
+			end
+		end
+
+		-- ====================================================
+		-- per player. hl = {n = Highlights used this frame}
+		-- ====================================================
+		local function updatePlayer(player, camera, project, camPos, vs, ox, oy, hl)
 			local char = player.Character
 			local hum = char and char:FindFirstChildOfClass("Humanoid")
 			local root = char and char:FindFirstChild("HumanoidRootPart")
@@ -3413,29 +4081,51 @@ return function(lib)
 			end
 			curFade = fadeFor(dist)
 			curVis = nil
+			local now = os.clock()
+			local maxHp = math.max(hum.MaxHealth, 1)
+			local hpFrac = math.clamp(hum.Health / maxHp, 0, 1)
 
 			-- new character (respawn): forget the old health values
 			if rec.lastChar ~= char then
 				rec.lastChar = char
 				rec.lastHp = nil
 				rec.hpVal, rec.ghost = nil, nil
+				rec.hitAt = -10
 			end
 
-			-- damage / heal numbers
-			if feat.Damage then
-				local hp = hum.Health
-				local last = rec.lastHp
-				if last and hp ~= last then
-					local d = last - hp
-					if d >= 1 then
-						spawnPopup(popupPos(char, root), d, false)
-					elseif d <= -2 and opt.dmgHeals == "On" and hp > 0 then
-						spawnPopup(popupPos(char, root), -d, true)
+			-- health events: damage numbers, hit markers, chams pulse
+			if feat.Damage or feat.HitMarker or (feat.Chams and opt.chamPulse == "On") then
+				local hp, last = hum.Health, rec.lastHp
+				if last then
+					if hp < last - 0.5 then
+						rec.hitAt = now
+						if feat.Damage and last - hp >= 1 then
+							spawnPopup(popupPos(char, root), last - hp, false)
+						end
+						if feat.HitMarker and player ~= LocalPlayer and now - lastShot < HIT_WINDOW then
+							spawnHit(popupPos(char, root), hp <= DEAD_HP)
+						end
+					elseif hp > last + 1.9 and feat.Damage and opt.dmgHeals == "On" and hp > 0 then
+						spawnPopup(popupPos(char, root), hp - last, true)
 					end
 				end
 				rec.lastHp = hp
 			else
 				rec.lastHp = nil
+			end
+
+			-- footstep rings: one ring per STRIDE studs walked on the ground
+			if feat.Footsteps and (player ~= LocalPlayer or opt.stepSelf == "On") then
+				local v = root.AssemblyLinearVelocity
+				local hs = Vector3.new(v.X, 0, v.Z).Magnitude
+				if hum.FloorMaterial ~= Enum.Material.Air and hs > 4 then
+					rec.stepAcc = (rec.stepAcc or 0) + hs * frameDt
+					if rec.stepAcc >= STRIDE then
+						rec.stepAcc = 0
+						local drop = hum.HipHeight > 0 and (hum.HipHeight + root.Size.Y / 2) or 3
+						spawnRing(root.Position - Vector3.new(0, drop - 0.05, 0), colorFor(slots.step, player, true))
+					end
+				end
 			end
 
 			-- off-screen arrow (ignores the visible check, not drawn for yourself)
@@ -3466,7 +4156,6 @@ return function(lib)
 			-- line of sight (checked a few times a second, not every frame)
 			local vis
 			if visCheck or feat.VisColors then
-				local now = os.clock()
 				if now >= rec.visAt then
 					rec.visAt = now + 0.08
 					rec.visVal = isVisible(char, camera)
@@ -3479,13 +4168,20 @@ return function(lib)
 			end
 			curVis = vis
 
-			-- chams
+			-- chams (nearest players get the limited Highlights, the rest use materials / wires)
 			if feat.Chams then
 				chamCfg.fill, chamCfg.outline = chamColors(player)
 				chamCfg.mode = opt.chamStyle
 				chamCfg.walls = opt.chamWalls == "On"
 				chamCfg.fillA, chamCfg.outA = slots.chamFill.a, slots.chamOutline.a
 				chamCfg.fade = curFade
+				chamCfg.pulse = opt.chamPulse == "On" and math.clamp(1 - (now - (rec.hitAt or -10)) / 0.5, 0, 1) or 0
+				chamCfg.pulseColor = colorOf(slots.chamPulse)
+				chamCfg.thick = CHAM_THICK[opt.chamThick] or 0
+				chamCfg.noHighlight = hl.n >= HL_MAX
+				if not chamCfg.noHighlight then
+					hl.n = hl.n + 1
+				end
 				Chams.update(rec, char, chamCfg)
 			elseif rec.cham then
 				Chams.hide(rec.cham)
@@ -3494,22 +4190,31 @@ return function(lib)
 			local hasB = needsBounds() and computeBounds(char, project)
 			local cx = (bnd.minX + bnd.maxX) / 2
 
-			-- box fill (solid or gradient strips)
+			-- box fill (solid, gradient strips, or colored by health)
 			if feat.BoxFill and hasB then
 				local c1 = colorFor(slots.fill, player, true)
+				local mode = opt.fillMode
+				if mode == "Health" then
+					if not (feat.VisColors and curVis ~= nil) then
+						c1 = healthColor(hpFrac)
+					end
+					mode = "Solid"
+				end
 				local c2 = colorOverridden() and c1:Lerp(Color3.new(0, 0, 0), 0.55) or colorOf(slots.fill2)
-				local fn = computeFill(opt.fillMode, c1, slots.fill.a, c2, slots.fill2.a)
+				local fn = computeFill(mode, c1, slots.fill.a, c2, slots.fill2.a)
 				rec.fillShown = setFill(rec.fillList, rec.fillShown, fn, fillRects)
 			elseif rec.fillShown > 0 then
 				hideShown(rec.fillList, rec.fillShown)
 				rec.fillShown = 0
 			end
 
-			-- box (+ dark outline behind it)
-			local n = feat.Box and computeBox(char, project, opt.style, hasB) or 0
+			-- box: shape + pulse (+ dark outline behind it)
+			local pm = opt.boxPulse == "On" and pulseMul(now) or 1
+			local n = feat.Box and computeBox(char, project, opt.style, hasB, opt.boxShape) or 0
 			local outN = (n > 0 and opt.boxOutline == "On") and n or 0
-			rec.boxOutShown = setLines(rec.boxOut, rec.boxOutShown, outN, segs, OUTLINE_COLOR, 0.8, THICKNESS + 2, 2)
-			rec.boxShown = setLines(rec.box, rec.boxShown, n, segs, colorFor(slots.box, player, true), slots.box.a, THICKNESS, 3)
+			rec.boxOutShown = setLines(rec.boxOut, rec.boxOutShown, outN, segs, OUTLINE_COLOR, 0.8 * pm, THICKNESS + 2, 2)
+			rec.boxShown = setLines(rec.box, rec.boxShown, n, segs, colorFor(slots.box, player, true), slots.box.a * pm,
+				THICKNESS * (opt.boxPulse == "On" and (0.85 + 0.35 * pm) or 1), 3)
 
 			-- skeleton (+ joint dots)
 			local sn, jn = 0, 0
@@ -3533,7 +4238,6 @@ return function(lib)
 			-- movement trail: remember where the player has been, draw it as a ribbon
 			n = 0
 			if feat.Trail then
-				local now = os.clock()
 				local life = opt.trailLife
 				local foot = root.Position - Vector3.new(0, 3, 0)
 				local tr = rec.trail
@@ -3592,34 +4296,15 @@ return function(lib)
 			n = feat.Tracers and computeTracer(char, project, ox, oy) or 0
 			rec.trcShown = setLines(rec.trc, rec.trcShown, n, tracerSeg, colorFor(slots.trc, player, true), slots.trc.a, 1, 2)
 
-			-- armor bar: the value moves toward the real one a little every frame
-			local armHas = false
-			if (feat.Armor or feat.ArmorText) and hasB then
-				local _, v = armorFrac(char)
-				rec.armVal = approach(rec.armVal, v or 0, frameDt)
-				armHas = rec.armVal > 0.5
-			else
-				rec.armVal = nil
-			end
-			local armFrac = armHas and math.clamp(rec.armVal / ARMOR_MAX, 0, 1) or 0
-			local armBarOn = armHas and feat.Armor
-			local armN = armHas and computeArmor(armFrac) or 0
-			if armBarOn then
-				drawBarBg(rec, "armBg", "armBgOn", armBg)
-				rec.armShown = setSquares(rec.arm, rec.armShown, armN, armRects)
-			else
-				hideArmBar(rec)
-			end
+			-- ================= bars: health / overheal / shield / armor, on the chosen side =================
+			local side, idx, lastKey = opt.hpSide, 0, nil
 
-			-- health bar + text (also smoothed); the ghost bar trails behind after damage
-			local hpTextW = 0
-			if (feat.Health or feat.HealthText) and hasB then
-				rec.hpVal = approach(rec.hpVal, hum.Health, frameDt)
-				local frac = math.clamp(rec.hpVal / math.max(hum.MaxHealth, 1), 0, 1)
-				n = computeHealth(frac)
+			if hasB and (feat.Health or feat.HealthText) then
+				rec.hpVal = approach(rec.hpVal, math.min(hum.Health, maxHp), frameDt)
+				local frac = math.clamp(rec.hpVal / maxHp, 0, 1)
+				local cnt = computeBar("hp", side, idx, frac, healthColor, opt.hpMode == "Gradient")
 				if feat.Health then
-					drawBarBg(rec, "hpBg", "hpBgOn", hpBg)
-					rec.hpShown = setSquares(rec.hp, rec.hpShown, n, hpRects)
+					drawBarK(rec, "hp", cnt)
 					if opt.hpGhost == "On" then
 						rec.ghost = rec.ghost or {}
 						local gf = stepGhost(rec.ghost, frac, frameDt)
@@ -3633,37 +4318,93 @@ return function(lib)
 						rec.ghost = nil
 						hideGhost(rec)
 					end
+					idx, lastKey = idx + 1, "hp"
 				else
-					hideHpBar(rec)
+					hideBarK(rec, "hp")
 					rec.ghost = nil
-				end
-				if feat.HealthText then
-					local str = (opt.hpFormat == "Percent") and (math.floor(frac * 100 + 0.5) .. "%") or tostring(math.floor(rec.hpVal + 0.5))
-					local t = getText(rec, "hpText", str, colorOf(slots.hpText), slots.hpText.a, opt.font)
-					local tw, th = textSize(t, str)
-					hpTextW = tw
-					local edge = armBarOn and armInfo.x or hpInfo.x
-					local ty = math.clamp(hpInfo.y - th / 2, hpBg[2], math.max(hpBg[2], hpBg[2] + hpBg[4] - th))
-					showText(rec, "hpText", t, edge - 3 - tw / 2, ty)
-				else
-					hideText(rec, "hpText")
 				end
 			else
 				rec.hpVal, rec.ghost = nil, nil
-				hideHpBar(rec)
-				hideText(rec, "hpText")
+				hideBarK(rec, "hp")
 			end
 
-			-- armor text: left of the armor bar, further left when the health text is on too
+			-- overheal: health above max
+			if hasB and feat.Health and opt.overheal == "On" and hum.Health > hum.MaxHealth + 0.5 then
+				rec.ovVal = approach(rec.ovVal, hum.Health - hum.MaxHealth, frameDt)
+				local c = colorOf(slots.overheal)
+				local cnt = computeBar("ov", side, idx, math.clamp(rec.ovVal / maxHp, 0, 1), function() return c end, false)
+				drawBarK(rec, "ov", cnt)
+				idx, lastKey = idx + 1, "ov"
+			else
+				rec.ovVal = nil
+				hideBarK(rec, "ov")
+			end
+
+			-- shield
+			local shV = (hasB and feat.Health and opt.shield == "On") and shieldValue(char) or nil
+			if shV and shV > 0.5 then
+				rec.shVal = approach(rec.shVal, shV, frameDt)
+				local c = colorOf(slots.shield)
+				local cnt = computeBar("sh", side, idx, math.clamp(rec.shVal / SHIELD_MAX, 0, 1), function() return c end, false)
+				drawBarK(rec, "sh", cnt)
+				idx, lastKey = idx + 1, "sh"
+			else
+				rec.shVal = nil
+				hideBarK(rec, "sh")
+			end
+
+			-- armor
+			local armHas = false
+			if hasB and (feat.Armor or feat.ArmorText) then
+				local _, v = armorFrac(char)
+				rec.armVal = approach(rec.armVal, v or 0, frameDt)
+				armHas = rec.armVal > 0.5
+			else
+				rec.armVal = nil
+			end
+			local armFrac = armHas and math.clamp(rec.armVal / ARMOR_MAX, 0, 1) or 0
+			if armHas then
+				local c = colorOf(slots.armor)
+				local cnt = computeBar("arm", side, idx, armFrac, function() return c end, false)
+				if feat.Armor then
+					drawBarK(rec, "arm", cnt)
+					idx, lastKey = idx + 1, "arm"
+				else
+					hideBarK(rec, "arm")
+				end
+			else
+				hideBarK(rec, "arm")
+			end
+
+			-- texts sit outside the whole bar stack
+			local edge = barInfo[lastKey or "hp"]
+			local horizSide = side == "Left" or side == "Right"
+			local hpExtra = 0
+			if hasB and feat.HealthText and rec.hpVal then
+				local frac = math.clamp(rec.hpVal / maxHp, 0, 1)
+				local str = (opt.hpFormat == "Percent") and (math.floor(frac * 100 + 0.5) .. "%") or tostring(math.floor(rec.hpVal + 0.5))
+				local t = getText(rec, "hpText", str, colorOf(slots.hpText), slots.hpText.a, opt.font)
+				local tw, th = textSize(t, str)
+				local x, y = textPos(edge, barInfo.hp, tw, th, 0)
+				showText(rec, "hpText", t, x, y)
+				hpExtra = horizSide and (tw + 4) or (th + 1)
+			else
+				hideText(rec, "hpText")
+			end
 			if armHas and feat.ArmorText then
 				local str = (opt.armFormat == "Percent") and (math.floor(armFrac * 100 + 0.5) .. "%") or tostring(math.floor(rec.armVal + 0.5))
 				local t = getText(rec, "armText", str, colorOf(slots.armText), slots.armText.a, opt.font)
 				local tw, th = textSize(t, str)
-				local ty = math.clamp(armInfo.y - th / 2, armBg[2], math.max(armBg[2], armBg[2] + armBg[4] - th))
-				showText(rec, "armText", t, armInfo.x - 3 - ((hpTextW > 0) and (hpTextW + 4) or 0) - tw / 2, ty)
+				local x, y = textPos(edge, barInfo.arm, tw, th, hpExtra)
+				showText(rec, "armText", t, x, y)
 			else
 				hideText(rec, "armText")
 			end
+
+			-- room that top / bottom bars take from the name and the weapon / distance text
+			local barRoom = idx > 0 and (3 + idx * BAR_STEP) or 0
+			local topRoom = side == "Top" and barRoom or 0
+			local bottomRoom = side == "Bottom" and barRoom or 0
 
 			-- name (+ distance when the weapon text is on too)
 			if feat.Name and hasB then
@@ -3672,7 +4413,7 @@ return function(lib)
 					str = str .. " " .. distanceText(dist)
 				end
 				local t = getText(rec, "name", str, colorFor(slots.name, player), slots.name.a, opt.font)
-				showText(rec, "name", t, cx, bnd.minY - PAD - 16)
+				showText(rec, "name", t, cx, bnd.minY - PAD - 16 - topRoom)
 			else
 				hideText(rec, "name")
 			end
@@ -3688,7 +4429,7 @@ return function(lib)
 			end
 
 			-- weapon, then distance, under the player
-			local by = bnd.maxY + PAD + 2
+			local by = bnd.maxY + PAD + 2 + bottomRoom
 			local wStr = (feat.Weapon and hasB) and weaponName(char) or nil
 			if wStr then
 				local t = getText(rec, "weapon", wStr, colorFor(slots.weapon, player), slots.weapon.a, opt.font)
@@ -3712,7 +4453,11 @@ return function(lib)
 				if wasActive then
 					hideAll()
 					hideDamage()
+					hideLines(hitLines)
+					hideLines(ringLines)
 					table.clear(popups)
+					table.clear(hits)
+					table.clear(rings)
 					wasActive = false
 				end
 				return
@@ -3733,13 +4478,24 @@ return function(lib)
 			if not opt.self and records[LocalPlayer] then
 				hideRecord(records[LocalPlayer])
 			end
+
+			-- nearest players first, so they get the limited number of Highlights
+			local list = {}
 			for _, player in ipairs(Players:GetPlayers()) do
 				if player ~= LocalPlayer or opt.self then
-					updatePlayer(player, camera, project, camPos, vs, ox, oy)
+					local r = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+					list[#list + 1] = {player, r and (r.Position - camPos).Magnitude or math.huge}
 				end
+			end
+			table.sort(list, function(a, b) return a[2] < b[2] end)
+			local hl = {n = 0}
+			for _, e in ipairs(list) do
+				updatePlayer(e[1], camera, project, camPos, vs, ox, oy, hl)
 			end
 			curVis = nil
 			updateDamage(project)
+			updateHits(project, vs)
+			updateRings(project)
 		end
 
 		local renderConn = RunService.RenderStepped:Connect(function(dt)
@@ -3758,13 +4514,24 @@ return function(lib)
 			removingConn:Disconnect()
 			moveConn:Disconnect()
 			endConn:Disconnect()
+			shotConn:Disconnect()
 			for player in pairs(records) do
 				removeRecord(player)
 			end
 			for _, t in ipairs(dmgTexts) do
 				kill(t)
 			end
-			for _, pool in ipairs({prevBox, prevBoxOut, prevSkel, prevJoint, prevHp, prevTrc, prevFill, prevArmor, prevLook, prevVel, prevGhost, prevTrail}) do
+			for _, l in ipairs(hitLines) do
+				kill(l)
+			end
+			for _, l in ipairs(ringLines) do
+				kill(l)
+			end
+			local pools = {prevBox, prevBoxOut, prevSkel, prevJoint, prevTrc, prevFill, prevLook, prevGhost, prevHit, prevRing}
+			for _, pool in pairs(prevBars) do
+				table.insert(pools, pool)
+			end
+			for _, pool in ipairs(pools) do
 				for _, f in ipairs(pool) do
 					f:Destroy()
 				end
@@ -3775,11 +4542,14 @@ return function(lib)
 			if prevDot then
 				prevDot:Destroy()
 			end
+			Chams.previewDestroy(prevChamState)
 			chamFolder:Destroy()
 			if folder3D then
 				folder3D:Destroy()
 			end
 			ui.destroy()
+			panel:Destroy()
+			panelStore:Destroy()
 			scroll:Destroy()
 		end
 		win.onClose(destroy)
@@ -3837,16 +4607,20 @@ return function(lib)
 			SetWeaponText = function(value) sw.Weapon.Set(value) end,
 			SetStatusText = function(value) sw.Status.Set(value) end,
 			SetDamageNumbers = function(value) sw.Damage.Set(value) end,
+			SetHitMarkers = function(value) sw.HitMarker.Set(value) end,
+			SetFootsteps = function(value) sw.Footsteps.Set(value) end,
 
 			-- box
 			SetStyle = function(name) pick("style", OPT.styles, name) end,
+			SetBoxShape = function(name) pick("boxShape", OPT.boxShapes, name) end, -- Square / Rounded / Dashed
+			SetBoxPulse = function(value) onOff("boxPulse", value) end,
 			SetColor = function(c) setSlot(slots.box, c) end,
 			SetAlpha = function(a)
 				slots.box.a = math.clamp(a, 0, 1)
 				ui.refresh()
 			end,
 			SetBoxOutline = function(value) onOff("boxOut", value) end,
-			SetBoxFillMode = function(name) pick("fillMode", OPT.fillModes, name) end, -- Solid / Fade Down / Fade Up / Two-tone
+			SetBoxFillMode = function(name) pick("fillMode", OPT.fillModes, name) end, -- Solid / Fade Down / Fade Up / Two-tone / Health
 			SetBoxFillColor = function(c, a)
 				setSlot(slots.fill, c)
 				if a then
@@ -3874,9 +4648,10 @@ return function(lib)
 			-- chams
 			SetChamsMode = function(name) pick("chamStyle", CHAM_MODES, name) end, -- Normal / Solid / Glow / Textured / Wireframe
 			SetChamsStyle = function(name) pick("chamStyle", CHAM_MODES, name) end,
-			SetChamsThroughWalls = function(value)
-				ui.choices.chamWalls.Set(value and "On" or "Off")
-			end,
+			SetChamsThroughWalls = function(value) onOff("chamWalls", value) end,
+			SetChamsPulse = function(value) onOff("chamPulse", value) end,
+			SetChamsThickness = function(name) pick("chamThick", OPT.chamThicks, name) end, -- Thin / Normal / Thick
+			SetChamsPulseColor = function(c) setSlot(slots.chamPulse, c) end,
 			SetChamsColors = function(fill, outline, fillAlpha, outlineAlpha)
 				setSlot(slots.chamFill, fill)
 				if outline then
@@ -3896,6 +4671,7 @@ return function(lib)
 			SetNameColor = function(c) setSlot(slots.name, c) end,
 
 			-- health / armor
+			SetHealthSide = function(name) pick("hpSide", OPT.sides, name) end, -- Left / Right / Top / Bottom
 			SetHealthMode = function(name) pick("hpMode", {"Solid", "Gradient"}, name) end,
 			SetHealthColors = function(full, mid, low)
 				setSlot(slots.hpFull, full)
@@ -3904,6 +4680,10 @@ return function(lib)
 			end,
 			SetHealthGhost = function(value) onOff("hpGhost", value) end,
 			SetGhostColor = function(c) setSlot(slots.ghost, c) end,
+			SetOverhealBar = function(value) onOff("overheal", value) end,
+			SetOverhealColor = function(c) setSlot(slots.overheal, c) end,
+			SetShieldBar = function(value) onOff("shield", value) end,
+			SetShieldColor = function(c) setSlot(slots.shield, c) end,
 			SetArmorColor = function(c) setSlot(slots.armor, c) end,
 			SetArmorTextFormat = function(name) pick("armFormat", OPT.formats, name) end,
 			SetArmorTextColor = function(c) setSlot(slots.armText, c) end,
@@ -3951,6 +4731,30 @@ return function(lib)
 					slots.trail2.a = math.clamp(tailAlpha, 0, 1)
 				end
 				ui.refresh()
+			end,
+
+			-- hit markers
+			SetHitMarkerStyle = function(name) pick("hitStyle", OPT.hitStyles, name) end, -- Cross / Plus
+			SetHitMarkerDuration = function(name) pick("hitDur", OPT.dmgSpeeds, name) end, -- Slow / Normal / Fast
+			SetHitMarkerPosition = function(name) pick("hitAnchor", OPT.hitAnchors, name) end, -- Crosshair / Target
+			SetHitMarkerSize = function(px) ui.choices.hitSize.Set(px) end, -- 4 - 20
+			SetHitMarkerColors = function(hit, killed)
+				setSlot(slots.hit, hit)
+				if killed then
+					setSlot(slots.kill, killed)
+				end
+			end,
+
+			-- footstep rings
+			SetFootstepRadius = function(studs) ui.choices.stepRadius.Set(studs) end, -- 3 - 12
+			SetFootstepDuration = function(seconds) ui.choices.stepLife.Set(seconds) end, -- 0.5 - 3
+			SetFootstepSelf = function(value) onOff("stepSelf", value) end,
+			SetFootstepColor = function(c, a)
+				setSlot(slots.step, c)
+				if a then
+					slots.step.a = math.clamp(a, 0, 1)
+					ui.refresh()
+				end
 			end,
 
 			-- tracers / arrows
