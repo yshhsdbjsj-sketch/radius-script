@@ -2948,25 +2948,24 @@ return function(lib)
 		-- ====================================================
 		-- preview on the 3D avatar render
 		-- ====================================================
-		local previewViewport
-		local prevBox, prevBoxOut, prevSkel, prevJoint, prevTrc = {}, {}, {}, {}, {}
-		local prevFill, prevLook, prevGhost, prevHit = {}, {}, {}, {}
-		local prevFillStrips, prevGlow, prevIconBg, prevIcon = {}, {{}, {}, {}}, {}, {}
-		local prevBars = {hp = {}, arm = {}}
-		local prevTexts = {}
-		local prevStatus = {}
-		local prevGhostState = {}
-		local prevHpState = {target = 1, shown = 1, nextHit = 0, hitAt = -10}
-		local prevDmg = {}
-		local prevDot, prevDotStroke
-		local prevChamState = {shells = {}}
+		-- all preview state lives in one table: Luau allows at most 200 local variables per function
+		local PV = {
+			prevBox = {}, prevBoxOut = {}, prevSkel = {}, prevJoint = {}, prevTrc = {},
+			prevFill = {}, prevLook = {}, prevGhost = {}, prevHit = {},
+			prevFillStrips = {}, prevGlow = {{}, {}, {}}, prevIconBg = {}, prevIcon = {},
+			prevBars = {hp = {}, arm = {}},
+			prevTexts = {}, prevStatus = {}, prevGhostState = {},
+			prevHpState = {target = 1, shown = 1, nextHit = 0, hitAt = -10},
+			prevDmg = {}, prevChamState = {shells = {}},
+			velParts = {}, trailParts = {}, ringParts = {},
+		}
 
 		local function findViewport()
-			if previewViewport and previewViewport.Parent then
-				return previewViewport
+			if PV.previewViewport and PV.previewViewport.Parent then
+				return PV.previewViewport
 			end
-			previewViewport = popup and popup:FindFirstChildWhichIsA("ViewportFrame", true) or nil
-			return previewViewport
+			PV.previewViewport = popup and popup:FindFirstChildWhichIsA("ViewportFrame", true) or nil
+			return PV.previewViewport
 		end
 
 		local function getFrame(pool, i, name, z)
@@ -2980,27 +2979,25 @@ return function(lib)
 				f.Visible = false
 				pool[i] = f
 			end
-			if f.Parent ~= previewViewport then
-				f.Parent = previewViewport
+			if f.Parent ~= PV.previewViewport then
+				f.Parent = PV.previewViewport
 			end
 			return f
 		end
 
 		-- velocity line + trail + chams in the preview are real 3D parts inside the viewport,
 		-- so the avatar covers whatever is behind them
-		local folder3D
-		local velParts, trailParts, ringParts = {}, {}, {}
 
 		local function ensure3D()
-			if not (folder3D and folder3D.Parent == previewViewport) then
-				folder3D = previewViewport:FindFirstChild("EspPreview3D")
-				if not folder3D then
-					folder3D = Instance.new("Folder")
-					folder3D.Name = "EspPreview3D"
-					folder3D.Parent = previewViewport
+			if not (PV.folder3D and PV.folder3D.Parent == PV.previewViewport) then
+				PV.folder3D = PV.previewViewport:FindFirstChild("EspPreview3D")
+				if not PV.folder3D then
+					PV.folder3D = Instance.new("Folder")
+					PV.folder3D.Name = "EspPreview3D"
+					PV.folder3D.Parent = PV.previewViewport
 				end
 			end
-			return folder3D
+			return PV.folder3D
 		end
 
 		local function get3D(pool, i)
@@ -3032,10 +3029,10 @@ return function(lib)
 		end
 
 		local function hide3D()
-			hide3DPool(velParts, 1)
-			hide3DPool(trailParts, 1)
-			hide3DPool(ringParts, 1)
-			Chams.previewClear(prevChamState)
+			hide3DPool(PV.velParts, 1)
+			hide3DPool(PV.trailParts, 1)
+			hide3DPool(PV.ringParts, 1)
+			Chams.previewClear(PV.prevChamState)
 		end
 
 		local function place3D(pool, i, a, b, color, opacity, thick)
@@ -3068,48 +3065,48 @@ return function(lib)
 		end
 
 		local function hidePreviewText(key)
-			local l = prevTexts[key]
+			local l = PV.prevTexts[key]
 			if l then
 				l.Visible = false
 			end
 		end
 
 		local function hideDotPreview()
-			if prevDot then
-				prevDot.Visible = false
+			if PV.prevDot then
+				PV.prevDot.Visible = false
 			end
 		end
 
 		local function hidePreview()
-			hidePool(prevBox)
-			hidePool(prevBoxOut)
-			hidePool(prevSkel)
-			hidePool(prevJoint)
-			hidePool(prevTrc)
-			hidePool(prevFill)
-			hidePool(prevFillStrips)
-			hidePool(prevIconBg)
-			hidePool(prevIcon)
-			for _, g in ipairs(prevGlow) do
+			hidePool(PV.prevBox)
+			hidePool(PV.prevBoxOut)
+			hidePool(PV.prevSkel)
+			hidePool(PV.prevJoint)
+			hidePool(PV.prevTrc)
+			hidePool(PV.prevFill)
+			hidePool(PV.prevFillStrips)
+			hidePool(PV.prevIconBg)
+			hidePool(PV.prevIcon)
+			for _, g in ipairs(PV.prevGlow) do
 				hidePool(g)
 			end
-			hidePool(prevLook)
-			hidePool(prevGhost)
-			hidePool(prevHit)
-			for _, pool in pairs(prevBars) do
+			hidePool(PV.prevLook)
+			hidePool(PV.prevGhost)
+			hidePool(PV.prevHit)
+			for _, pool in pairs(PV.prevBars) do
 				hidePool(pool)
 			end
-			if previewViewport then
+			if PV.previewViewport then
 				hide3D()
 			end
 			hideDotPreview()
-			for key in pairs(prevTexts) do
+			for key in pairs(PV.prevTexts) do
 				hidePreviewText(key)
 			end
 		end
 
 		local function showPreviewText(key, str, x, y, ax, ay, c, a, fontName, size)
-			local l = prevTexts[key]
+			local l = PV.prevTexts[key]
 			if not l then
 				l = Instance.new("TextLabel")
 				l.Name = "Esp_" .. key
@@ -3119,10 +3116,10 @@ return function(lib)
 				l.TextStrokeTransparency = 0.5
 				l.ZIndex = 22
 				l.Visible = false
-				prevTexts[key] = l
+				PV.prevTexts[key] = l
 			end
-			if l.Parent ~= previewViewport then
-				l.Parent = previewViewport
+			if l.Parent ~= PV.previewViewport then
+				l.Parent = PV.previewViewport
 			end
 			l.AnchorPoint = Vector2.new(ax, ay)
 			l.TextXAlignment = (ax == 1 and Enum.TextXAlignment.Right) or (ax == 0 and Enum.TextXAlignment.Left) or Enum.TextXAlignment.Center
@@ -3137,32 +3134,32 @@ return function(lib)
 		end
 
 		local function showDotPreview(x, y, r, c, a, filled)
-			if not prevDot then
-				prevDot = Instance.new("Frame")
-				prevDot.Name = "EspHeadDot"
-				prevDot.AnchorPoint = Vector2.new(0.5, 0.5)
-				prevDot.BorderSizePixel = 0
-				prevDot.Active = false
-				prevDot.ZIndex = 21
-				prevDot.Visible = false
+			if not PV.prevDot then
+				PV.prevDot = Instance.new("Frame")
+				PV.prevDot.Name = "EspHeadDot"
+				PV.prevDot.AnchorPoint = Vector2.new(0.5, 0.5)
+				PV.prevDot.BorderSizePixel = 0
+				PV.prevDot.Active = false
+				PV.prevDot.ZIndex = 21
+				PV.prevDot.Visible = false
 				local corner = Instance.new("UICorner")
 				corner.CornerRadius = UDim.new(1, 0)
-				corner.Parent = prevDot
-				prevDotStroke = Instance.new("UIStroke")
-				prevDotStroke.Thickness = 1.5
-				prevDotStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
-				prevDotStroke.Parent = prevDot
+				corner.Parent = PV.prevDot
+				PV.prevDotStroke = Instance.new("UIStroke")
+				PV.prevDotStroke.Thickness = 1.5
+				PV.prevDotStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+				PV.prevDotStroke.Parent = PV.prevDot
 			end
-			if prevDot.Parent ~= previewViewport then
-				prevDot.Parent = previewViewport
+			if PV.prevDot.Parent ~= PV.previewViewport then
+				PV.prevDot.Parent = PV.previewViewport
 			end
-			prevDot.Position = UDim2.fromOffset(x, y)
-			prevDot.Size = UDim2.fromOffset(r * 2, r * 2)
-			prevDot.BackgroundColor3 = c
-			prevDot.BackgroundTransparency = filled and (1 - a) or 1
-			prevDotStroke.Color = c
-			prevDotStroke.Transparency = 1 - a
-			prevDot.Visible = true
+			PV.prevDot.Position = UDim2.fromOffset(x, y)
+			PV.prevDot.Size = UDim2.fromOffset(r * 2, r * 2)
+			PV.prevDot.BackgroundColor3 = c
+			PV.prevDot.BackgroundTransparency = filled and (1 - a) or 1
+			PV.prevDotStroke.Color = c
+			PV.prevDotStroke.Transparency = 1 - a
+			PV.prevDot.Visible = true
 		end
 
 		-- c can be a Color3 or a function(segment) -> Color3; thick nil = use the segment's own thickness
@@ -3190,7 +3187,7 @@ return function(lib)
 		-- round dots on the skeleton joints
 		local function drawJointPreview(count, c, a, r)
 			for i = 1, count do
-				local f = getFrame(prevJoint, i, "EspJoint", 21)
+				local f = getFrame(PV.prevJoint, i, "EspJoint", 21)
 				if not f:FindFirstChildOfClass("UICorner") then
 					local cr = Instance.new("UICorner")
 					cr.CornerRadius = UDim.new(1, 0)
@@ -3204,8 +3201,8 @@ return function(lib)
 				f.Size = UDim2.fromOffset(r * 2, r * 2)
 				f.Visible = true
 			end
-			for i = count + 1, #prevJoint do
-				prevJoint[i].Visible = false
+			for i = count + 1, #PV.prevJoint do
+				PV.prevJoint[i].Visible = false
 			end
 		end
 
@@ -3241,10 +3238,10 @@ return function(lib)
 
 		local function drawGhostPreview(show)
 			if not show then
-				hidePool(prevGhost)
+				hidePool(PV.prevGhost)
 				return
 			end
-			local f = getFrame(prevGhost, 1, "EspGhost", 20)
+			local f = getFrame(PV.prevGhost, 1, "EspGhost", 20)
 			f.AnchorPoint = Vector2.new(0, 0)
 			f.Rotation = 0
 			f.BackgroundColor3 = colorOf(slots.ghost)
@@ -3256,7 +3253,7 @@ return function(lib)
 
 		-- gradient box fill: one frame + a UIGradient (colors and opacity)
 		local function drawFillPreview(c1, a1, c2, a2, mode)
-			local f = getFrame(prevFill, 1, "EspFill", 18)
+			local f = getFrame(PV.prevFill, 1, "EspFill", 18)
 			f.AnchorPoint = Vector2.new(0, 0)
 			f.Rotation = 0
 			f.BackgroundColor3 = Color3.new(1, 1, 1)
@@ -3289,7 +3286,7 @@ return function(lib)
 		local function drawFillStrips(n)
 			for i = 1, n do
 				local r = fillRects[i]
-				local f = getFrame(prevFillStrips, i, "EspFillStrip", 18)
+				local f = getFrame(PV.prevFillStrips, i, "EspFillStrip", 18)
 				f.AnchorPoint = Vector2.new(0, 0)
 				f.Rotation = 0
 				f.BackgroundColor3 = r[5]
@@ -3298,19 +3295,19 @@ return function(lib)
 				f.Size = UDim2.fromOffset(r[3], r[4])
 				f.Visible = true
 			end
-			for i = n + 1, #prevFillStrips do
-				prevFillStrips[i].Visible = false
+			for i = n + 1, #PV.prevFillStrips do
+				PV.prevFillStrips[i].Visible = false
 			end
 		end
 
 		local function hideIconPreview()
-			hidePool(prevIconBg)
-			hidePool(prevIcon)
+			hidePool(PV.prevIconBg)
+			hidePool(PV.prevIcon)
 		end
 
 		local function drawIconPreview(kind, ix, iy, size, badge)
 			if badge then
-				local f = getFrame(prevIconBg, 1, "EspIconBg", 20)
+				local f = getFrame(PV.prevIconBg, 1, "EspIconBg", 20)
 				if not f:FindFirstChildOfClass("UICorner") then
 					local cr = Instance.new("UICorner")
 					cr.CornerRadius = UDim.new(0, 4)
@@ -3324,10 +3321,10 @@ return function(lib)
 				f.Size = UDim2.fromOffset(size + 6, size + 6)
 				f.Visible = true
 			else
-				hidePool(prevIconBg)
+				hidePool(PV.prevIconBg)
 			end
 			local n = computeIcon(kind, ix, iy, size, iconSeg)
-			drawLinePool(prevIcon, n, iconSeg, colorOf(slots.icon), slots.icon.a, nil, 22)
+			drawLinePool(PV.prevIcon, n, iconSeg, colorOf(slots.icon), slots.icon.a, nil, 22)
 		end
 
 		local function updatePreview()
@@ -3362,7 +3359,7 @@ return function(lib)
 			end
 
 			-- demo health: a few hits, then a heal (drives the ghost bar, damage numbers, cham pulse, hit marker)
-			local ps = prevHpState
+			local ps = PV.prevHpState
 			if now >= ps.nextHit then
 				local before = ps.target
 				if ps.target > 0.35 then
@@ -3376,9 +3373,9 @@ return function(lib)
 					ps.hitAt = now
 				end
 				if delta ~= 0 and (delta > 0 or opt.dmgHeals == "On") then
-					table.insert(prevDmg, {t0 = now, amt = math.abs(delta), heal = delta < 0, dx = math.random(-12, 12)})
-					if #prevDmg > 3 then
-						table.remove(prevDmg, 1)
+					table.insert(PV.prevDmg, {t0 = now, amt = math.abs(delta), heal = delta < 0, dx = math.random(-12, 12)})
+					if #PV.prevDmg > 3 then
+						table.remove(PV.prevDmg, 1)
 					end
 				end
 			end
@@ -3396,9 +3393,9 @@ return function(lib)
 					pulse = (opt.chamPulse == "On") and math.clamp(1 - (now - ps.hitAt) / 0.5, 0, 1) or 0,
 					pulseColor = colorOf(slots.chamPulse),
 					thick = CHAM_THICK[opt.chamThick] or 0,
-				}, prevChamState)
+				}, PV.prevChamState)
 			else
-				Chams.previewClear(prevChamState)
+				Chams.previewClear(PV.prevChamState)
 			end
 
 			-- box fill
@@ -3413,15 +3410,15 @@ return function(lib)
 				end
 				local c2 = colorOverridden() and c1:Lerp(Color3.new(0, 0, 0), 0.55) or colorOf(slots.fill2)
 				if opt.fillAnim ~= "Off" then
-					hidePool(prevFill)
+					hidePool(PV.prevFill)
 					drawFillStrips(computeFill(mode, c1, slots.fill.a, c2, slots.fill2.a, opt.fillAnim, now * (OPT.speeds[opt.fillSpeed] or 1)))
 				else
-					hidePool(prevFillStrips)
+					hidePool(PV.prevFillStrips)
 					drawFillPreview(c1, slots.fill.a, c2, slots.fill2.a, mode)
 				end
 			else
-				hidePool(prevFill)
-				hidePool(prevFillStrips)
+				hidePool(PV.prevFill)
+				hidePool(PV.prevFillStrips)
 			end
 
 			-- box: shape, animated dashes, gradient, glow, pulse
@@ -3430,21 +3427,21 @@ return function(lib)
 			local pm = opt.boxPulse == "On" and pulseMul(now) or 1
 			local n = feat.Box and computeBox(model, project, opt.style, hasB, opt.boxShape) or 0
 			if feat.Box and opt.boxOutline == "On" then
-				drawLinePool(prevBoxOut, n, segs, OUTLINE_COLOR, 0.8 * pm, THICKNESS + 2, 19)
+				drawLinePool(PV.prevBoxOut, n, segs, OUTLINE_COLOR, 0.8 * pm, THICKNESS + 2, 19)
 			else
-				hidePool(prevBoxOut)
+				hidePool(PV.prevBoxOut)
 			end
 			local boxCol = boxColorFn(nil, n, now, speed)
 			local thickB = THICKNESS * (opt.boxPulse == "On" and (0.85 + 0.35 * pm) or 1)
 			local glowN = GLOW_LEVELS[opt.boxGlow] or 0
 			for gi = 1, 3 do
 				if gi <= glowN and n > 0 then
-					drawLinePool(prevGlow[gi], n, segs, boxCol, slots.box.a * pm * (0.22 / gi), thickB + gi * 3, 18)
+					drawLinePool(PV.prevGlow[gi], n, segs, boxCol, slots.box.a * pm * (0.22 / gi), thickB + gi * 3, 18)
 				else
-					hidePool(prevGlow[gi])
+					hidePool(PV.prevGlow[gi])
 				end
 			end
-			drawLinePool(prevBox, n, segs, boxCol, slots.box.a * pm, thickB)
+			drawLinePool(PV.prevBox, n, segs, boxCol, slots.box.a * pm, thickB)
 
 			local jn = 0
 			n = 0
@@ -3452,7 +3449,7 @@ return function(lib)
 				n, jn = computeSkeleton(model, project, opt.joints == "On")
 			end
 			local skelC = colorFor(slots.skel, nil, true)
-			drawLinePool(prevSkel, n, bones, skelC, slots.skel.a, opt.skelThick)
+			drawLinePool(PV.prevSkel, n, bones, skelC, slots.skel.a, opt.skelThick)
 			drawJointPreview(jn, skelC, slots.skel.a, 1.5 + opt.skelThick)
 
 			n = feat.LookDir and computeLook(model, project, opt.lookLen) or 0
@@ -3476,7 +3473,7 @@ return function(lib)
 				t = math.max(t, 0)
 				sg[3], sg[4] = sx + dx * t, sy + dy * t
 			end
-			drawLinePool(prevLook, n, lookSeg, colorFor(slots.look, nil, true), slots.look.a, 1.5)
+			drawLinePool(PV.prevLook, n, lookSeg, colorFor(slots.look, nil, true), slots.look.a, 1.5)
 
 			-- velocity line + movement trail: 3D parts that follow the way the avatar faces
 			local rootPart = model:FindFirstChild("HumanoidRootPart") or model:FindFirstChild("UpperTorso") or model:FindFirstChild("Torso")
@@ -3499,7 +3496,7 @@ return function(lib)
 				local from = rootPart.Position + fwd * 0.6
 				local to = from + fwd * len
 				vn = vn + 1
-				place3D(velParts, vn, from, to, col, op, th)
+				place3D(PV.velParts, vn, from, to, col, op, th)
 				if opt.velArrow == "On" and len > 0.7 then
 					local hl = math.min(0.9, len * 0.45)
 					local back = -fwd
@@ -3513,11 +3510,11 @@ return function(lib)
 					}
 					for _, w in ipairs(wings) do
 						vn = vn + 1
-						place3D(velParts, vn, to, to + w * hl, col, op, th)
+						place3D(PV.velParts, vn, to, to + w * hl, col, op, th)
 					end
 				end
 			end
-			hide3DPool(velParts, vn + 1)
+			hide3DPool(PV.velParts, vn + 1)
 
 			local tn = 0
 			if feat.Trail and rootPart then
@@ -3533,12 +3530,12 @@ return function(lib)
 					if prevPt then
 						local col, op, th = trailStyle((prevAge + age) / 2, c1, slots.trail.a, c2, slots.trail2.a, gradient, fade, opt.trailWidth, taper)
 						tn = tn + 1
-						place3D(trailParts, tn, prevPt, pt, col, op, th / pps)
+						place3D(PV.trailParts, tn, prevPt, pt, col, op, th / pps)
 					end
 					prevPt, prevAge = pt, age
 				end
 			end
-			hide3DPool(trailParts, tn + 1)
+			hide3DPool(PV.trailParts, tn + 1)
 
 			if feat.HeadDot then
 				local hx, hy, hr = computeHead(model, project)
@@ -3556,7 +3553,7 @@ return function(lib)
 				local ox, oy = tracerOrigin(vpSize.X, vpSize.Y, nil)
 				n = computeTracer(model, project, ox, oy)
 			end
-			drawLinePool(prevTrc, n, tracerSeg, colorFor(slots.trc, nil, true), slots.trc.a, 1)
+			drawLinePool(PV.prevTrc, n, tracerSeg, colorFor(slots.trc, nil, true), slots.trc.a, 1)
 
 			-- footstep ring demo: a 3D ring under the avatar's feet (clipped to the preview box)
 			local rn = 0
@@ -3573,12 +3570,12 @@ return function(lib)
 					local pt = center + Vector3.new(math.cos(a) * radius, 0, math.sin(a) * radius)
 					if prevP then
 						rn = rn + 1
-						place3D(ringParts, rn, prevP, pt, col, op, 1.5 / pps)
+						place3D(PV.ringParts, rn, prevP, pt, col, op, 1.5 / pps)
 					end
 					prevP = pt
 				end
 			end
-			hide3DPool(ringParts, rn + 1)
+			hide3DPool(PV.ringParts, rn + 1)
 
 			-- hit marker demo: shows on every demo hit
 			local hitDur = HIT_DUR[opt.hitDur] or 0.5
@@ -3590,9 +3587,9 @@ return function(lib)
 				end
 				computeHit(mx, my, opt.hitSize, opt.hitStyle, 1 + 0.35 * math.max(0, 1 - age * 5))
 				local a = (age < 0.5 and 1 or 1 - (age - 0.5) / 0.5) * slots.hit.a
-				drawLinePool(prevHit, 4, hitSeg, colorOf(slots.hit), a, 2)
+				drawLinePool(PV.prevHit, 4, hitSeg, colorOf(slots.hit), a, 2)
 			else
-				hidePool(prevHit)
+				hidePool(PV.prevHit)
 			end
 
 			-- ================= bars (same layout code as the real ESP) =================
@@ -3601,9 +3598,9 @@ return function(lib)
 			if hasB and (feat.Health or feat.HealthText) then
 				local cnt = computeBar("hp", side, idx, frac, healthColor, opt.hpMode == "Gradient")
 				if feat.Health then
-					drawBarPreview(prevBars.hp, barBg.hp, barRects.hp, cnt, true)
+					drawBarPreview(PV.prevBars.hp, barBg.hp, barRects.hp, cnt, true)
 					if opt.hpGhost == "On" then
-						local gf = stepGhost(prevGhostState, frac, frameDt)
+						local gf = stepGhost(PV.prevGhostState, frac, frameDt)
 						if gf - frac > 0.004 then
 							computeGhost(frac, gf)
 							drawGhostPreview(true)
@@ -3615,11 +3612,11 @@ return function(lib)
 					end
 					idx, lastKey = idx + 1, "hp"
 				else
-					hidePool(prevBars.hp)
+					hidePool(PV.prevBars.hp)
 					drawGhostPreview(false)
 				end
 			else
-				hidePool(prevBars.hp)
+				hidePool(PV.prevBars.hp)
 				drawGhostPreview(false)
 			end
 
@@ -3628,13 +3625,13 @@ return function(lib)
 				local c = colorOf(slots.armor)
 				local cnt = computeBar("arm", side, idx, armFrac, function() return c end, false)
 				if feat.Armor then
-					drawBarPreview(prevBars.arm, barBg.arm, barRects.arm, cnt, true)
+					drawBarPreview(PV.prevBars.arm, barBg.arm, barRects.arm, cnt, true)
 					idx, lastKey = idx + 1, "arm"
 				else
-					hidePool(prevBars.arm)
+					hidePool(PV.prevBars.arm)
 				end
 			else
-				hidePool(prevBars.arm)
+				hidePool(PV.prevBars.arm)
 			end
 
 			-- texts sit outside the whole bar stack
@@ -3675,7 +3672,7 @@ return function(lib)
 
 			-- status: top right, cycles through the four words
 			if feat.Status and hasB then
-				local word, a = stepStatus(prevStatus, STATUS_LIST[math.floor(now / 1.6) % #STATUS_LIST + 1], frameDt)
+				local word, a = stepStatus(PV.prevStatus, STATUS_LIST[math.floor(now / 1.6) % #STATUS_LIST + 1], frameDt)
 				showPreviewText("status", word, bnd.maxX + PAD + 4, bnd.minY - PAD, 0, 0, STATUS_COLOR, a, opt.font)
 			else
 				hidePreviewText("status")
@@ -3710,9 +3707,9 @@ return function(lib)
 
 			-- damage numbers: float up from the head when the demo health changes
 			local dur = DMG_DUR[opt.dmgSpeed] or 1.1
-			for i = #prevDmg, 1, -1 do
-				if now - prevDmg[i].t0 > dur then
-					table.remove(prevDmg, i)
+			for i = #PV.prevDmg, 1, -1 do
+				if now - PV.prevDmg[i].t0 > dur then
+					table.remove(PV.prevDmg, i)
 				end
 			end
 			local hx, hy, hr
@@ -3720,7 +3717,7 @@ return function(lib)
 				hx, hy, hr = computeHead(model, project)
 			end
 			for i = 1, 3 do
-				local p = prevDmg[i]
+				local p = PV.prevDmg[i]
 				if hx and p then
 					local age = (now - p.t0) / dur
 					local opacity = age < 0.55 and 1 or math.clamp(1 - (age - 0.55) / 0.45, 0, 1)
@@ -4882,8 +4879,8 @@ return function(lib)
 			for _, l in ipairs(ringLines) do
 				kill(l)
 			end
-			local pools = {prevBox, prevBoxOut, prevSkel, prevJoint, prevTrc, prevFill, prevLook, prevGhost, prevHit, prevFillStrips, prevIconBg, prevIcon, prevGlow[1], prevGlow[2], prevGlow[3]}
-			for _, pool in pairs(prevBars) do
+			local pools = {PV.prevBox, PV.prevBoxOut, PV.prevSkel, PV.prevJoint, PV.prevTrc, PV.prevFill, PV.prevLook, PV.prevGhost, PV.prevHit, PV.prevFillStrips, PV.prevIconBg, PV.prevIcon, PV.prevGlow[1], PV.prevGlow[2], PV.prevGlow[3]}
+			for _, pool in pairs(PV.prevBars) do
 				table.insert(pools, pool)
 			end
 			for _, pool in ipairs(pools) do
@@ -4891,16 +4888,16 @@ return function(lib)
 					f:Destroy()
 				end
 			end
-			for _, l in pairs(prevTexts) do
+			for _, l in pairs(PV.prevTexts) do
 				l:Destroy()
 			end
-			if prevDot then
-				prevDot:Destroy()
+			if PV.prevDot then
+				PV.prevDot:Destroy()
 			end
-			Chams.previewDestroy(prevChamState)
+			Chams.previewDestroy(PV.prevChamState)
 			chamFolder:Destroy()
-			if folder3D then
-				folder3D:Destroy()
+			if PV.folder3D then
+				PV.folder3D:Destroy()
 			end
 			ui.destroy()
 			panel:Destroy()
