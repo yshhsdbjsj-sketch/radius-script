@@ -5,7 +5,7 @@
 --
 -- Every option starts OFF. Each module's settings open in their own side panel (the arrow on the row).
 -- New in this version: box shapes (Rounded / Dashed / Pulse / Health fill), health bar on any side with
--- overheal + shield bars, chams damage pulse + outline thickness, hit markers, footstep rings,
+-- chams damage pulse + outline thickness, hit markers, footstep rings,
 -- rewritten chams (budgeted Highlights, working preview), side panel + real dropdowns.
 
 return function(lib)
@@ -31,12 +31,11 @@ return function(lib)
 	local BAR_STEP = HP_W + 3
 	local LINE_H = 14
 	local ARMOR_MAX = 130
-	local SHIELD_MAX = 100
 	local LOOK_LEN = 6
 	local DEAD_HP = 10
 	local GHOST_HOLD = 0.45
 	local DMG_MAX = 24
-	local RING_MAX, RING_SEGS = 14, 16
+	local RING_MAX, RING_SEGS = 40, 16
 	local HIT_MAX = 6
 	local HL_MAX = 28
 	local STRIDE = 4.2
@@ -178,17 +177,6 @@ return function(lib)
 			return math.clamp(armor.Value / ARMOR_MAX, 0, 1), armor.Value
 		end
 		return nil
-	end
-
-	-- shield: BodyEffects.Shield / Shield value / "Shield" attribute (nil = none)
-	local function shieldValue(char)
-		local e = char:FindFirstChild("BodyEffects")
-		local v = (e and e:FindFirstChild("Shield")) or char:FindFirstChild("Shield")
-		if v and (v:IsA("NumberValue") or v:IsA("IntValue")) then
-			return v.Value
-		end
-		local a = char:GetAttribute("Shield")
-		return typeof(a) == "number" and a or nil
 	end
 
 	-- health ghost: holds the old value for a moment after damage, then slides to the real value
@@ -938,10 +926,10 @@ return function(lib)
 	end
 
 	-- ========================================================
-	-- bars: health / overheal / shield / armor on any side of the box
+	-- bars: health / armor on any side of the box
 	-- ========================================================
 	local barRects, barBg, barInfo = {}, {}, {}
-	for _, key in ipairs({"hp", "ov", "sh", "arm"}) do
+	for _, key in ipairs({"hp", "arm"}) do
 		barRects[key] = {}
 		for i = 1, HP_SEGS do
 			barRects[key][i] = {0, 0, 0, 0, Color3.new(1, 1, 1)}
@@ -1102,7 +1090,7 @@ return function(lib)
 		local opt = {
 			style = "Full", boxShape = "Square", boxPulse = "Off", boxOutline = "Off",
 			nameSource = "Display", hpMode = "Gradient", hpFormat = "Number", armFormat = "Number",
-			hpSide = "Left", overheal = "Off", shield = "Off", hpGhost = "Off",
+			hpSide = "Left", hpGhost = "Off",
 			skelThick = 1, joints = "Off", tracerFrom = "Bottom", teamSource = "Custom",
 			headStyle = "Outline", chamStyle = "Normal", chamWalls = "Off", chamPulse = "Off", chamThick = "Thin",
 			arrowSize = "Medium", arrowRadius = "Mid", lookLen = 6, self = false, dead = false, font = "UI",
@@ -1157,8 +1145,6 @@ return function(lib)
 			hpMid = newSlot(Color3.fromRGB(240, 210, 60)),
 			hpLow = newSlot(Color3.fromRGB(235, 60, 60)),
 			ghost = newSlot(Color3.fromRGB(238, 238, 244)),
-			overheal = newSlot(Color3.fromRGB(255, 200, 60)),
-			shield = newSlot(Color3.fromRGB(80, 220, 255)),
 			armor = newSlot(Color3.fromRGB(70, 140, 255)),
 			head = newSlot(Color3.fromRGB(255, 255, 255)),
 			look = newSlot(Color3.fromRGB(255, 255, 255)),
@@ -2507,11 +2493,6 @@ return function(lib)
 				local c = secChoice(sec, order, order[1], function(name)
 					S.Bind(slots[stops[name]])
 				end, cols, true)
-				if not noDots and c.buttons then
-					for name, btn in pairs(c.buttons) do
-						addDot(btn, stops[name])
-					end
-				end
 				S = makeSwatch(sec.f, sec.y, withAlpha, "Color", sec.item)
 				S.Bind(slots[stops[order[1]]])
 				table.insert(pickers, S)
@@ -2572,13 +2553,9 @@ return function(lib)
 				choices.hpMode = secChoice(sec, {"Solid", "Gradient"}, opt.hpMode, function(n) opt.hpMode = n end)
 				secLabel(sec, "Ghost bar")
 				choices.hpGhost = secChoice(sec, OPT.onoff, opt.hpGhost, function(n) opt.hpGhost = n end)
-				secLabel(sec, "Overheal bar")
-				choices.overheal = secChoice(sec, OPT.onoff, opt.overheal, function(n) opt.overheal = n end)
-				secLabel(sec, "Shield bar")
-				choices.shield = secChoice(sec, OPT.onoff, opt.shield, function(n) opt.shield = n end)
 				secColors(sec,
-					{Full = "hpFull", Mid = "hpMid", Low = "hpLow", Ghost = "ghost", Overheal = "overheal", Shield = "shield"},
-					{"Full", "Mid", "Low", "Ghost", "Overheal", "Shield"}, false)
+					{Full = "hpFull", Mid = "hpMid", Low = "hpLow", Ghost = "ghost"},
+					{"Full", "Mid", "Low", "Ghost"}, false)
 			end
 			build.Armor = function(sec)
 				secColor(sec, slots.armor, false)
@@ -2770,8 +2747,8 @@ return function(lib)
 		-- ====================================================
 		local previewViewport
 		local prevBox, prevBoxOut, prevSkel, prevJoint, prevTrc = {}, {}, {}, {}, {}
-		local prevFill, prevLook, prevGhost, prevHit, prevRing = {}, {}, {}, {}, {}
-		local prevBars = {hp = {}, ov = {}, sh = {}, arm = {}}
+		local prevFill, prevLook, prevGhost, prevHit = {}, {}, {}, {}
+		local prevBars = {hp = {}, arm = {}}
 		local prevTexts = {}
 		local prevStatus = {}
 		local prevGhostState = {}
@@ -2808,7 +2785,7 @@ return function(lib)
 		-- velocity line + trail + chams in the preview are real 3D parts inside the viewport,
 		-- so the avatar covers whatever is behind them
 		local folder3D
-		local velParts, trailParts = {}, {}
+		local velParts, trailParts, ringParts = {}, {}, {}
 
 		local function ensure3D()
 			if not (folder3D and folder3D.Parent == previewViewport) then
@@ -2853,6 +2830,7 @@ return function(lib)
 		local function hide3D()
 			hide3DPool(velParts, 1)
 			hide3DPool(trailParts, 1)
+			hide3DPool(ringParts, 1)
 			Chams.previewClear(prevChamState)
 		end
 
@@ -2908,7 +2886,6 @@ return function(lib)
 			hidePool(prevLook)
 			hidePool(prevGhost)
 			hidePool(prevHit)
-			hidePool(prevRing)
 			for _, pool in pairs(prevBars) do
 				hidePool(pool)
 			end
@@ -3305,15 +3282,27 @@ return function(lib)
 			end
 			drawLinePool(prevTrc, n, tracerSeg, colorFor(slots.trc, nil, true), slots.trc.a, 1)
 
-			-- footstep ring demo: a ring keeps expanding under the avatar's feet
+			-- footstep ring demo: a 3D ring under the avatar's feet (clipped to the preview box)
+			local rn = 0
 			if feat.Footsteps and rootPart then
 				local age = (now % opt.stepLife) / opt.stepLife
-				local rn = computeRing(rootPart.Position - Vector3.new(0, 2.9, 0),
-					0.6 + easeOut(age) * (math.min(opt.stepRadius, 6) - 0.6), project)
-				drawLinePool(prevRing, rn, ringSeg, colorFor(slots.step, nil, true), slots.step.a * (1 - age) ^ 1.5, 1.5)
-			else
-				hidePool(prevRing)
+				local radius = 0.6 + easeOut(age) * (math.min(opt.stepRadius, 3.2) - 0.6)
+				local center = rootPart.Position - Vector3.new(0, 2.9, 0)
+				local col = colorFor(slots.step, nil, true)
+				local op = slots.step.a * (1 - age) ^ 1.5
+				local prevP
+				local firstP
+				for i = 0, RING_SEGS do
+					local a = i / RING_SEGS * math.pi * 2
+					local pt = center + Vector3.new(math.cos(a) * radius, 0, math.sin(a) * radius)
+					if prevP then
+						rn = rn + 1
+						place3D(ringParts, rn, prevP, pt, col, op, 1.5 / pps)
+					end
+					prevP = pt
+				end
 			end
+			hide3DPool(ringParts, rn + 1)
 
 			-- hit marker demo: shows on every demo hit
 			local hitDur = HIT_DUR[opt.hitDur] or 0.5
@@ -3356,24 +3345,6 @@ return function(lib)
 			else
 				hidePool(prevBars.hp)
 				drawGhostPreview(false)
-			end
-
-			if hasB and feat.Health and opt.overheal == "On" then
-				local c = colorOf(slots.overheal)
-				local cnt = computeBar("ov", side, idx, 0.35 + 0.35 * math.sin(now * 1.1), function() return c end, false)
-				drawBarPreview(prevBars.ov, barBg.ov, barRects.ov, cnt, true)
-				idx, lastKey = idx + 1, "ov"
-			else
-				hidePool(prevBars.ov)
-			end
-
-			if hasB and feat.Health and opt.shield == "On" then
-				local c = colorOf(slots.shield)
-				local cnt = computeBar("sh", side, idx, 0.45 + 0.4 * math.sin(now * 0.9), function() return c end, false)
-				drawBarPreview(prevBars.sh, barBg.sh, barRects.sh, cnt, true)
-				idx, lastKey = idx + 1, "sh"
-			else
-				hidePool(prevBars.sh)
 			end
 
 			local armFrac = 0.6 + 0.4 * math.sin(now * 0.7 + 1.5)
@@ -3556,9 +3527,9 @@ return function(lib)
 				fillList = {}, fillShown = 0,
 				text = {}, textOn = {}, textFont = {},
 				status = {},
-				hpVal = nil, armVal = nil, ovVal = nil, shVal = nil,
+				hpVal = nil, armVal = nil,
 				lastHp = nil, lastChar = nil,
-				hitAt = -10, stepAcc = 0,
+				hitAt = -10, stepAcc = 0, lastPos = nil,
 				visAt = 0, visVal = true,
 			}
 		end
@@ -3663,7 +3634,7 @@ return function(lib)
 				hideBarK(rec, key)
 			end
 			hideGhost(rec)
-			rec.hpVal, rec.armVal, rec.ovVal, rec.shVal, rec.ghost = nil, nil, nil, nil, nil
+			rec.hpVal, rec.armVal, rec.ghost = nil, nil, nil
 			if rec.dotOn then
 				rec.dot.Visible = false
 				rec.dotOn = false
@@ -4119,18 +4090,30 @@ return function(lib)
 				rec.lastHp = nil
 			end
 
-			-- footstep rings: one ring per STRIDE studs walked on the ground
+			-- footstep rings: measured from how far the player actually moved. Remote humanoids do not
+			-- report velocity / floor state reliably, so this works for every player
 			if feat.Footsteps and (player ~= LocalPlayer or opt.stepSelf == "On") then
-				local v = root.AssemblyLinearVelocity
-				local hs = Vector3.new(v.X, 0, v.Z).Magnitude
-				if hum.FloorMaterial ~= Enum.Material.Air and hs > 4 then
-					rec.stepAcc = (rec.stepAcc or 0) + hs * frameDt
-					if rec.stepAcc >= STRIDE then
+				local pos = root.Position
+				local lp = rec.lastPos
+				rec.lastPos = pos
+				if lp and frameDt > 0 then
+					local d = pos - lp
+					local flat = Vector3.new(d.X, 0, d.Z).Magnitude
+					if flat < 15 and math.abs(d.Y) / frameDt < 14 then -- ignore teleports and falling
+						if flat / frameDt > 3 then
+							rec.stepAcc = (rec.stepAcc or 0) + flat
+							if rec.stepAcc >= STRIDE then
+								rec.stepAcc = 0
+								local drop = hum.HipHeight > 0 and (hum.HipHeight + root.Size.Y / 2) or 3
+								spawnRing(pos - Vector3.new(0, drop - 0.05, 0), colorFor(slots.step, player, true))
+							end
+						end
+					else
 						rec.stepAcc = 0
-						local drop = hum.HipHeight > 0 and (hum.HipHeight + root.Size.Y / 2) or 3
-						spawnRing(root.Position - Vector3.new(0, drop - 0.05, 0), colorFor(slots.step, player, true))
 					end
 				end
+			else
+				rec.lastPos = nil
 			end
 
 			-- off-screen arrow (ignores the visible check, not drawn for yourself)
@@ -4301,7 +4284,7 @@ return function(lib)
 			n = feat.Tracers and computeTracer(char, project, ox, oy) or 0
 			rec.trcShown = setLines(rec.trc, rec.trcShown, n, tracerSeg, colorFor(slots.trc, player, true), slots.trc.a, 1, 2)
 
-			-- ================= bars: health / overheal / shield / armor, on the chosen side =================
+			-- ================= bars: health / armor, on the chosen side =================
 			local side, idx, lastKey = opt.hpSide, 0, nil
 
 			if hasB and (feat.Health or feat.HealthText) then
@@ -4331,31 +4314,6 @@ return function(lib)
 			else
 				rec.hpVal, rec.ghost = nil, nil
 				hideBarK(rec, "hp")
-			end
-
-			-- overheal: health above max
-			if hasB and feat.Health and opt.overheal == "On" and hum.Health > hum.MaxHealth + 0.5 then
-				rec.ovVal = approach(rec.ovVal, hum.Health - hum.MaxHealth, frameDt)
-				local c = colorOf(slots.overheal)
-				local cnt = computeBar("ov", side, idx, math.clamp(rec.ovVal / maxHp, 0, 1), function() return c end, false)
-				drawBarK(rec, "ov", cnt)
-				idx, lastKey = idx + 1, "ov"
-			else
-				rec.ovVal = nil
-				hideBarK(rec, "ov")
-			end
-
-			-- shield
-			local shV = (hasB and feat.Health and opt.shield == "On") and shieldValue(char) or nil
-			if shV and shV > 0.5 then
-				rec.shVal = approach(rec.shVal, shV, frameDt)
-				local c = colorOf(slots.shield)
-				local cnt = computeBar("sh", side, idx, math.clamp(rec.shVal / SHIELD_MAX, 0, 1), function() return c end, false)
-				drawBarK(rec, "sh", cnt)
-				idx, lastKey = idx + 1, "sh"
-			else
-				rec.shVal = nil
-				hideBarK(rec, "sh")
 			end
 
 			-- armor
@@ -4532,7 +4490,7 @@ return function(lib)
 			for _, l in ipairs(ringLines) do
 				kill(l)
 			end
-			local pools = {prevBox, prevBoxOut, prevSkel, prevJoint, prevTrc, prevFill, prevLook, prevGhost, prevHit, prevRing}
+			local pools = {prevBox, prevBoxOut, prevSkel, prevJoint, prevTrc, prevFill, prevLook, prevGhost, prevHit}
 			for _, pool in pairs(prevBars) do
 				table.insert(pools, pool)
 			end
@@ -4685,10 +4643,6 @@ return function(lib)
 			end,
 			SetHealthGhost = function(value) onOff("hpGhost", value) end,
 			SetGhostColor = function(c) setSlot(slots.ghost, c) end,
-			SetOverhealBar = function(value) onOff("overheal", value) end,
-			SetOverhealColor = function(c) setSlot(slots.overheal, c) end,
-			SetShieldBar = function(value) onOff("shield", value) end,
-			SetShieldColor = function(c) setSlot(slots.shield, c) end,
 			SetArmorColor = function(c) setSlot(slots.armor, c) end,
 			SetArmorTextFormat = function(name) pick("armFormat", OPT.formats, name) end,
 			SetArmorTextColor = function(c) setSlot(slots.armText, c) end,
