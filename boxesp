@@ -1348,8 +1348,13 @@ return function(lib)
 		scroll.Parent = page
 
 		-- closed settings frames are parked here
-		local panelStore = Instance.new("Folder")
+		-- must be a hidden Frame: GuiObjects inside a Folder would still render on the page
+		local panelStore = Instance.new("Frame")
 		panelStore.Name = "EspPanelStore"
+		panelStore.BackgroundTransparency = 1
+		panelStore.BorderSizePixel = 0
+		panelStore.Size = UDim2.fromOffset(0, 0)
+		panelStore.Visible = false
 		panelStore.Parent = page
 
 		local panel = Instance.new("Frame")
