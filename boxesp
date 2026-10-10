@@ -26,7 +26,8 @@ return function(lib)
 	local JOINT_MAX = 15
 	local TRAIL_MAX = 40
 	local HP_SEGS = 16
-	local FILL_SEGS = 14
+	local FILL_SEGS = 20
+	local GLOW_LEVELS = {Low = 1, Medium = 2, High = 3}
 	local HP_W = 3
 	local BAR_STEP = HP_W + 3
 	local LINE_H = 14
@@ -620,6 +621,7 @@ return function(lib)
 	end
 
 	-- box shapes (2D "Full" style): Square / Rounded / Dashed
+	local dashPhase = 0 -- 0-1, how far the dashes have travelled around the box (set every frame)
 	local function pushSeg(n, ax, ay, bx, by)
 		local s = segs[n + 1]
 		if not s then
@@ -648,6 +650,58 @@ return function(lib)
 		return n
 	end
 
+	-- point on the box outline, `s` studs-of-pixels clockwise from the top-left corner
+	local function perimPoint(x0, y0, x1, y1, w, h, s)
+		if s <= w then
+			return x0 + s, y0
+		elseif s <= w + h then
+			return x1, y0 + (s - w)
+		elseif s <= 2 * w + h then
+			return x1 - (s - w - h), y1
+		end
+		return x0, y1 - (s - 2 * w - h)
+	end
+
+	-- dashes spaced evenly around the whole outline; `phase` slides them around the player
+	local function dashedRect(x0, y0, x1, y1, phase)
+		local w, h = x1 - x0, y1 - y0
+		local P = 2 * (w + h)
+		if P < 4 then
+			return 0
+		end
+		local n = math.clamp(math.floor(P / (DASH + GAP) + 0.5), 1, 56)
+		local period = P / n
+		local dl = period * DASH / (DASH + GAP)
+		local off = (phase % 1) * period
+		local cnt = 0
+		local cuts = {w, w + h, 2 * w + h}
+		local function emit(sa, sb)
+			local a = sa
+			for _, c in ipairs(cuts) do
+				if a < c and sb > c then
+					local ax, ay = perimPoint(x0, y0, x1, y1, w, h, a)
+					local bx, by = perimPoint(x0, y0, x1, y1, w, h, c)
+					cnt = pushSeg(cnt, ax, ay, bx, by)
+					a = c
+				end
+			end
+			local ax, ay = perimPoint(x0, y0, x1, y1, w, h, a)
+			local bx, by = perimPoint(x0, y0, x1, y1, w, h, sb)
+			cnt = pushSeg(cnt, ax, ay, bx, by)
+		end
+		for k = 0, n - 1 do
+			local s0 = (k * period + off) % P
+			local s1 = s0 + dl
+			if s1 > P then
+				emit(s0, P)
+				emit(0, s1 - P)
+			else
+				emit(s0, s1)
+			end
+		end
+		return cnt
+	end
+
 	local function shapedBox(x0, y0, x1, y1, shape)
 		local n = 0
 		if shape == "Rounded" then
@@ -671,11 +725,13 @@ return function(lib)
 			end
 			return n
 		end
-		local dashed = shape == "Dashed"
-		n = edgeSegs(n, x0, y0, x1, y0, dashed)
-		n = edgeSegs(n, x1, y0, x1, y1, dashed)
-		n = edgeSegs(n, x1, y1, x0, y1, dashed)
-		n = edgeSegs(n, x0, y1, x0, y0, dashed)
+		if shape == "Dashed" then
+			return dashedRect(x0, y0, x1, y1, dashPhase)
+		end
+		n = pushSeg(n, x0, y0, x1, y0)
+		n = pushSeg(n, x1, y0, x1, y1)
+		n = pushSeg(n, x1, y1, x0, y1)
+		n = pushSeg(n, x0, y1, x0, y0)
 		return n
 	end
 
@@ -906,10 +962,26 @@ return function(lib)
 		return c1, a1
 	end
 
-	local function computeFill(mode, c1, a1, c2, a2)
+	-- animated fill: Scan (bright band sweeping down), Pulse, Wave, Rainbow
+	local function animMul(anim, t, tm)
+		if anim == "Scan" then
+			local pos = (tm * 0.45) % 1.6 - 0.3
+			return 0.25 + 0.75 * math.max(0, 1 - math.abs(t - pos) / 0.3)
+		elseif anim == "Pulse" then
+			return 0.55 + 0.45 * math.sin(tm * 3)
+		elseif anim == "Wave" then
+			return 0.6 + 0.4 * math.sin(t * 7 - tm * 4)
+		end
+		return 1
+	end
+
+	-- tm = time already multiplied by the animation speed
+	local function computeFill(mode, c1, a1, c2, a2, anim, tm)
+		anim = anim or "Off"
+		tm = tm or 0
 		local x0, y0 = bnd.minX - PAD, bnd.minY - PAD
 		local w, h = bnd.maxX - bnd.minX + PAD * 2, bnd.maxY - bnd.minY + PAD * 2
-		if mode == "Solid" then
+		if mode == "Solid" and anim == "Off" then
 			local r = fillRects[1]
 			r[1], r[2], r[3], r[4], r[5], r[6] = x0, y0, w, h, c1, a1
 			return 1
@@ -918,7 +990,13 @@ return function(lib)
 		for i = 0, n - 1 do
 			local ya = math.floor(y0 + h * i / n + 0.5)
 			local yb = math.floor(y0 + h * (i + 1) / n + 0.5)
-			local c, a = fillAt(mode, (i + 0.5) / n, c1, a1, c2, a2)
+			local t = (i + 0.5) / n
+			local c, a = fillAt(mode, t, c1, a1, c2, a2)
+			if anim == "Rainbow" then
+				c = Color3.fromHSV((t * 0.8 + tm * 0.15) % 1, 0.65, 1)
+			else
+				a = a * animMul(anim, t, tm)
+			end
 			local r = fillRects[i + 1]
 			r[1], r[2], r[3], r[4], r[5], r[6] = x0, ya, w, math.max(yb - ya, 1), c, a
 		end
@@ -1033,6 +1111,66 @@ return function(lib)
 		end
 	end
 
+	-- ========================================================
+	-- weapon icons: small glyphs drawn from lines (Roblox tool thumbnails can't be drawn reliably)
+	-- ========================================================
+	local ICON_KINDS = {"Pistol", "Rifle", "Melee", "Throwable", "Tool"}
+	-- glyph segments: {x1, y1, x2, y2, thickness} in 0-1 space, thickness relative to icon size
+	local GLYPHS = {
+		Pistol = {{0.12, 0.38, 0.88, 0.38, 0.2}, {0.30, 0.46, 0.26, 0.88, 0.17}, {0.48, 0.52, 0.56, 0.66, 0.08}},
+		Rifle = {{0.03, 0.46, 0.97, 0.46, 0.15}, {0.03, 0.46, 0.08, 0.72, 0.12}, {0.50, 0.52, 0.47, 0.9, 0.12},
+			{0.30, 0.52, 0.27, 0.78, 0.1}, {0.62, 0.32, 0.82, 0.32, 0.08}},
+		Melee = {{0.18, 0.86, 0.82, 0.14, 0.14}, {0.28, 0.52, 0.52, 0.74, 0.1}, {0.12, 0.92, 0.22, 0.82, 0.16}},
+		Tool = {{0.5, 0.08, 0.92, 0.5, 0.1}, {0.92, 0.5, 0.5, 0.92, 0.1}, {0.5, 0.92, 0.08, 0.5, 0.1}, {0.08, 0.5, 0.5, 0.08, 0.1}},
+	}
+	local WEAPON_WORDS = {
+		{"Throwable", {"grenade", "bomb", "flash", "molotov", "smoke", "c4", "tnt", "dynamite", "frag"}},
+		{"Melee", {"knife", "sword", "blade", "bat", "axe", "machete", "katana", "hammer", "pan", "club", "saber", "dagger", "spear", "shovel", "crowbar"}},
+		{"Pistol", {"pistol", "glock", "revolver", "deagle", "desert", "luger", "usp", "p250", "m9", "colt", "handgun", "revo", "silencer", "tec", "magnum"}},
+		{"Rifle", {"rifle", "ak", "m4", "smg", "uzi", "sniper", "awp", "lmg", "mp5", "shotgun", "gun", "scar", "aug", "famas", "carbine", "ar15", "double", "barrett", "rpg"}},
+	}
+	local function weaponKind(name)
+		local l = string.lower(name)
+		for _, entry in ipairs(WEAPON_WORDS) do
+			for _, w in ipairs(entry[2]) do
+				if string.find(l, w, 1, true) then
+					return entry[1]
+				end
+			end
+		end
+		return "Tool"
+	end
+
+	local iconSeg = {}
+	for i = 1, 12 do
+		iconSeg[i] = {0, 0, 0, 0, 1}
+	end
+	-- fills iconSeg with screen-space segments {x1, y1, x2, y2, thickness}, returns the count
+	local function computeIcon(kind, cx, cy, size, list)
+		local sc = size * 0.82
+		local ox, oy = cx - sc / 2, cy - sc / 2
+		local n = 0
+		local function add(x1, y1, x2, y2, w)
+			n = n + 1
+			local s = list[n]
+			s[1], s[2], s[3], s[4], s[5] = ox + x1 * sc, oy + y1 * sc, ox + x2 * sc, oy + y2 * sc, math.max(w * sc, 1)
+		end
+		if kind == "Throwable" then
+			local px, py, r = 0.5, 0.6, 0.3
+			for i = 0, 7 do
+				local a0, a1 = i / 8 * math.pi * 2, (i + 1) / 8 * math.pi * 2
+				add(px + math.cos(a0) * r, py + math.sin(a0) * r, px + math.cos(a1) * r, py + math.sin(a1) * r, 0.1)
+			end
+			add(0.5, 0.3, 0.5, 0.12, 0.1)
+			add(0.5, 0.14, 0.7, 0.14, 0.08)
+			return n
+		end
+		for _, g in ipairs(GLYPHS[kind] or GLYPHS.Tool) do
+			add(g[1], g[2], g[3], g[4], g[5])
+		end
+		return n
+	end
+
 	local ringSeg, ringPX, ringPY, ringPV = {}, {}, {}, {}
 	for i = 1, RING_SEGS do
 		ringSeg[i] = {0, 0, 0, 0}
@@ -1072,7 +1210,7 @@ return function(lib)
 		local FEATURES = {
 			"Box", "BoxFill", "Chams", "Name", "Health", "Armor", "ArmorText", "HealthText", "Skeleton",
 			"HeadDot", "LookDir", "VelLine", "Trail", "Tracers", "Arrows", "Distance", "Weapon", "Status", "Damage",
-			"HitMarker", "Footsteps",
+			"HitMarker", "Footsteps", "WeaponIcon",
 		}
 		local LABELS = {
 			Box = "Box Esp", BoxFill = "Box Fill", Chams = "Chams", Name = "Name Esp",
@@ -1080,7 +1218,7 @@ return function(lib)
 			Skeleton = "Skeleton Esp", HeadDot = "Head Dot", LookDir = "Look Direction",
 			VelLine = "Velocity Line", Trail = "Movement Trail", Tracers = "Tracers", Arrows = "Off-screen Arrows",
 			Distance = "Distance Text", Weapon = "Weapon Text", Status = "Status Text",
-			Damage = "Damage Numbers", HitMarker = "Hit Markers", Footsteps = "Footstep Rings",
+			Damage = "Damage Numbers", HitMarker = "Hit Markers", Footsteps = "Footstep Rings", WeaponIcon = "Weapon Icon",
 		}
 		local feat = {TeamColors = false, VisColors = false}
 		for _, key in ipairs(FEATURES) do
@@ -1089,6 +1227,9 @@ return function(lib)
 
 		local opt = {
 			style = "Full", boxShape = "Square", boxPulse = "Off", boxOutline = "Off",
+			dashAnim = "Off", boxGrad = "Off", boxGradAnim = "Off", boxGlow = "Off", boxSpeed = "Normal",
+			fillAnim = "Off", fillSpeed = "Normal",
+			iconStyle = "Badge", iconSize = "Medium", iconPos = "Below",
 			nameSource = "Display", hpMode = "Gradient", hpFormat = "Number", armFormat = "Number",
 			hpSide = "Left", hpGhost = "Off",
 			skelThick = 1, joints = "Off", tracerFrom = "Bottom", teamSource = "Custom",
@@ -1119,6 +1260,15 @@ return function(lib)
 			chamThicks = {"Thin", "Normal", "Thick"},
 			hitStyles = {"Cross", "Plus"},
 			hitAnchors = {"Crosshair", "Target"},
+			gradModes = {"Off", "Two-tone", "Rainbow"},
+			glowLevels = {"Off", "Low", "Medium", "High"},
+			fillAnims = {"Off", "Scan", "Pulse", "Wave", "Rainbow"},
+			speedNames = {"Slow", "Normal", "Fast"},
+			speeds = {Slow = 0.5, Normal = 1, Fast = 1.9},
+			iconStyles = {"Badge", "Glyph"},
+			iconSizes = {Small = 14, Medium = 20, Large = 28},
+			iconSizeNames = {"Small", "Medium", "Large"},
+			iconPositions = {"Below", "Right"},
 		}
 		local DMG_DUR = {Slow = 1.6, Normal = 1.1, Fast = 0.7}
 
@@ -1132,6 +1282,8 @@ return function(lib)
 
 		local slots = {
 			box = newSlot(Color3.fromRGB(180, 180, 180)),
+			box2 = newSlot(Color3.fromRGB(96, 124, 255)),
+			icon = newSlot(Color3.fromRGB(255, 255, 255)),
 			fill = newSlot(Color3.fromRGB(180, 180, 180), 0.25),
 			fill2 = newSlot(Color3.fromRGB(96, 124, 255), 0.25),
 			name = newSlot(Color3.fromRGB(255, 255, 255)),
@@ -1205,7 +1357,7 @@ return function(lib)
 
 		local function needsBounds()
 			return feat.BoxFill or feat.Name or feat.Health or feat.Armor or feat.HealthText or feat.ArmorText
-				or feat.Distance or feat.Weapon or feat.Status or (feat.Box and opt.style ~= "3D")
+				or feat.Distance or feat.Weapon or feat.WeaponIcon or feat.Status or (feat.Box and opt.style ~= "3D")
 		end
 
 		local curFade = 1
@@ -2512,11 +2664,21 @@ return function(lib)
 				choices.style = secChoice(sec, OPT.styles, opt.style, function(n) opt.style = n end)
 				secLabel(sec, "Shape (Full style)")
 				choices.boxShape = secChoice(sec, OPT.boxShapes, opt.boxShape, function(n) opt.boxShape = n end)
+				secLabel(sec, "Animated dashes (Dashed shape)")
+				choices.dashAnim = secChoice(sec, OPT.onoff, opt.dashAnim, function(n) opt.dashAnim = n end)
+				secLabel(sec, "Outline gradient")
+				choices.boxGrad = secChoice(sec, OPT.gradModes, opt.boxGrad, function(n) opt.boxGrad = n end)
+				secLabel(sec, "Animate gradient")
+				choices.boxGradAnim = secChoice(sec, OPT.onoff, opt.boxGradAnim, function(n) opt.boxGradAnim = n end)
+				secLabel(sec, "Glow")
+				choices.boxGlow = secChoice(sec, OPT.glowLevels, opt.boxGlow, function(n) opt.boxGlow = n end)
+				secLabel(sec, "Animation speed")
+				choices.boxSpeed = secChoice(sec, OPT.speedNames, opt.boxSpeed, function(n) opt.boxSpeed = n end)
 				secLabel(sec, "Pulse")
 				choices.boxPulse = secChoice(sec, OPT.onoff, opt.boxPulse, function(n) opt.boxPulse = n end)
-				secLabel(sec, "Outline")
+				secLabel(sec, "Dark outline")
 				choices.boxOut = secChoice(sec, OPT.onoff, opt.boxOutline, function(n) opt.boxOutline = n end)
-				secColor(sec, slots.box)
+				secColors(sec, {Primary = "box", Secondary = "box2"}, {"Primary", "Secondary"}, true)
 			end
 			build.Font = function(sec)
 				secLabel(sec, "Typeface")
@@ -2528,6 +2690,10 @@ return function(lib)
 			build.BoxFill = function(sec)
 				secLabel(sec, "Mode (Health = colored by health)")
 				choices.fillMode = secChoice(sec, OPT.fillModes, opt.fillMode, function(n) opt.fillMode = n end)
+				secLabel(sec, "Animation")
+				choices.fillAnim = secChoice(sec, OPT.fillAnims, opt.fillAnim, function(n) opt.fillAnim = n end)
+				secLabel(sec, "Animation speed")
+				choices.fillSpeed = secChoice(sec, OPT.speedNames, opt.fillSpeed, function(n) opt.fillSpeed = n end)
 				secColors(sec, {Top = "fill", Bottom = "fill2"}, {"Top", "Bottom"}, true)
 			end
 			build.Chams = function(sec)
@@ -2652,6 +2818,15 @@ return function(lib)
 				choices.stepSelf = secChoice(sec, OPT.onoff, opt.stepSelf, function(n) opt.stepSelf = n end)
 				secColor(sec, slots.step)
 			end
+			build.WeaponIcon = function(sec)
+				secLabel(sec, "Style")
+				choices.iconStyle = secChoice(sec, OPT.iconStyles, opt.iconStyle, function(n) opt.iconStyle = n end)
+				secLabel(sec, "Size")
+				choices.iconSize = secChoice(sec, OPT.iconSizeNames, opt.iconSize, function(n) opt.iconSize = n end)
+				secLabel(sec, "Position")
+				choices.iconPos = secChoice(sec, OPT.iconPositions, opt.iconPos, function(n) opt.iconPos = n end)
+				secColor(sec, slots.icon)
+			end
 			build.TeamColors = function(sec)
 				secLabel(sec, "Source")
 				choices.teamSource = secChoice(sec, {"Custom", "Roblox"}, opt.teamSource, function(n) opt.teamSource = n end)
@@ -2742,12 +2917,41 @@ return function(lib)
 			return w / 2, h
 		end
 
+		-- outline color: solid, or a gradient that rotates around the box (per segment)
+		local function boxColorFn(player, n, now, speed)
+			local base = colorFor(slots.box, player, true)
+			local mode = opt.boxGrad
+			if mode == "Off" or n < 1 then
+				return base
+			end
+			if mode == "Rainbow" and colorOverridden() then
+				return base
+			end
+			local cx, cy = 0, 0
+			for i = 1, n do
+				local sg = segs[i]
+				cx, cy = cx + sg[1] + sg[3], cy + sg[2] + sg[4]
+			end
+			cx, cy = cx / (2 * n), cy / (2 * n)
+			local phase = opt.boxGradAnim == "On" and (now * 0.25 * speed) or 0
+			local c2 = colorOverridden() and base:Lerp(Color3.new(0, 0, 0), 0.55) or colorOf(slots.box2)
+			return function(sg)
+				local mx, my = (sg[1] + sg[3]) / 2, (sg[2] + sg[4]) / 2
+				local t = (math.atan2(my - cy, mx - cx) / (math.pi * 2) + 0.5 + phase) % 1
+				if mode == "Rainbow" then
+					return Color3.fromHSV(t, 0.75, 1)
+				end
+				return base:Lerp(c2, 1 - math.abs(2 * t - 1))
+			end
+		end
+
 		-- ====================================================
 		-- preview on the 3D avatar render
 		-- ====================================================
 		local previewViewport
 		local prevBox, prevBoxOut, prevSkel, prevJoint, prevTrc = {}, {}, {}, {}, {}
 		local prevFill, prevLook, prevGhost, prevHit = {}, {}, {}, {}
+		local prevFillStrips, prevGlow, prevIconBg, prevIcon = {}, {{}, {}, {}}, {}, {}
 		local prevBars = {hp = {}, arm = {}}
 		local prevTexts = {}
 		local prevStatus = {}
@@ -2883,6 +3087,12 @@ return function(lib)
 			hidePool(prevJoint)
 			hidePool(prevTrc)
 			hidePool(prevFill)
+			hidePool(prevFillStrips)
+			hidePool(prevIconBg)
+			hidePool(prevIcon)
+			for _, g in ipairs(prevGlow) do
+				hidePool(g)
+			end
 			hidePool(prevLook)
 			hidePool(prevGhost)
 			hidePool(prevHit)
@@ -2955,17 +3165,20 @@ return function(lib)
 			prevDot.Visible = true
 		end
 
+		-- c can be a Color3 or a function(segment) -> Color3; thick nil = use the segment's own thickness
 		local function drawLinePool(pool, count, list, c, a, thick, z)
+			local cf = type(c) == "function"
 			for i = 1, count do
 				local l = getFrame(pool, i, "EspLine", z)
 				local sg = list[i]
+				local th = thick or sg[5] or 1
 				local dx, dy = sg[3] - sg[1], sg[4] - sg[2]
 				local len = math.sqrt(dx * dx + dy * dy)
 				l.AnchorPoint = Vector2.new(0.5, 0.5)
-				l.BackgroundColor3 = c
+				l.BackgroundColor3 = cf and c(sg) or c
 				l.BackgroundTransparency = 1 - a
 				l.Position = UDim2.fromOffset((sg[1] + sg[3]) / 2, (sg[2] + sg[4]) / 2)
-				l.Size = UDim2.fromOffset(len + thick, thick)
+				l.Size = UDim2.fromOffset(len + th, th)
 				l.Rotation = math.deg(math.atan2(dy, dx))
 				l.Visible = true
 			end
@@ -3072,6 +3285,51 @@ return function(lib)
 			f.Visible = true
 		end
 
+		-- animated fill: horizontal strips (the single-frame gradient can't animate)
+		local function drawFillStrips(n)
+			for i = 1, n do
+				local r = fillRects[i]
+				local f = getFrame(prevFillStrips, i, "EspFillStrip", 18)
+				f.AnchorPoint = Vector2.new(0, 0)
+				f.Rotation = 0
+				f.BackgroundColor3 = r[5]
+				f.BackgroundTransparency = 1 - r[6]
+				f.Position = UDim2.fromOffset(r[1], r[2])
+				f.Size = UDim2.fromOffset(r[3], r[4])
+				f.Visible = true
+			end
+			for i = n + 1, #prevFillStrips do
+				prevFillStrips[i].Visible = false
+			end
+		end
+
+		local function hideIconPreview()
+			hidePool(prevIconBg)
+			hidePool(prevIcon)
+		end
+
+		local function drawIconPreview(kind, ix, iy, size, badge)
+			if badge then
+				local f = getFrame(prevIconBg, 1, "EspIconBg", 20)
+				if not f:FindFirstChildOfClass("UICorner") then
+					local cr = Instance.new("UICorner")
+					cr.CornerRadius = UDim.new(0, 4)
+					cr.Parent = f
+				end
+				f.AnchorPoint = Vector2.new(0.5, 0.5)
+				f.Rotation = 0
+				f.BackgroundColor3 = Color3.fromRGB(14, 14, 18)
+				f.BackgroundTransparency = 0.3
+				f.Position = UDim2.fromOffset(ix, iy)
+				f.Size = UDim2.fromOffset(size + 6, size + 6)
+				f.Visible = true
+			else
+				hidePool(prevIconBg)
+			end
+			local n = computeIcon(kind, ix, iy, size, iconSeg)
+			drawLinePool(prevIcon, n, iconSeg, colorOf(slots.icon), slots.icon.a, nil, 22)
+		end
+
 		local function updatePreview()
 			local viewport = findViewport()
 			if not (master and anyOn() and popup and popup.Visible and viewport) then
@@ -3154,12 +3412,21 @@ return function(lib)
 					mode = "Solid"
 				end
 				local c2 = colorOverridden() and c1:Lerp(Color3.new(0, 0, 0), 0.55) or colorOf(slots.fill2)
-				drawFillPreview(c1, slots.fill.a, c2, slots.fill2.a, mode)
+				if opt.fillAnim ~= "Off" then
+					hidePool(prevFill)
+					drawFillStrips(computeFill(mode, c1, slots.fill.a, c2, slots.fill2.a, opt.fillAnim, now * (OPT.speeds[opt.fillSpeed] or 1)))
+				else
+					hidePool(prevFillStrips)
+					drawFillPreview(c1, slots.fill.a, c2, slots.fill2.a, mode)
+				end
 			else
 				hidePool(prevFill)
+				hidePool(prevFillStrips)
 			end
 
-			-- box (shape + pulse)
+			-- box: shape, animated dashes, gradient, glow, pulse
+			local speed = OPT.speeds[opt.boxSpeed] or 1
+			dashPhase = opt.dashAnim == "On" and (now * 0.35 * speed) % 1 or 0
 			local pm = opt.boxPulse == "On" and pulseMul(now) or 1
 			local n = feat.Box and computeBox(model, project, opt.style, hasB, opt.boxShape) or 0
 			if feat.Box and opt.boxOutline == "On" then
@@ -3167,8 +3434,17 @@ return function(lib)
 			else
 				hidePool(prevBoxOut)
 			end
-			drawLinePool(prevBox, n, segs, colorFor(slots.box, nil, true), slots.box.a * pm,
-				THICKNESS * (opt.boxPulse == "On" and (0.85 + 0.35 * pm) or 1))
+			local boxCol = boxColorFn(nil, n, now, speed)
+			local thickB = THICKNESS * (opt.boxPulse == "On" and (0.85 + 0.35 * pm) or 1)
+			local glowN = GLOW_LEVELS[opt.boxGlow] or 0
+			for gi = 1, 3 do
+				if gi <= glowN and n > 0 then
+					drawLinePool(prevGlow[gi], n, segs, boxCol, slots.box.a * pm * (0.22 / gi), thickB + gi * 3, 18)
+				else
+					hidePool(prevGlow[gi])
+				end
+			end
+			drawLinePool(prevBox, n, segs, boxCol, slots.box.a * pm, thickB)
 
 			local jn = 0
 			n = 0
@@ -3406,6 +3682,20 @@ return function(lib)
 			end
 
 			local by = bnd.maxY + PAD + 2 + bottomRoom
+			if feat.WeaponIcon and hasB then
+				local size = OPT.iconSizes[opt.iconSize] or 20
+				local badge = opt.iconStyle == "Badge"
+				local ix, iy
+				if opt.iconPos == "Right" then
+					ix, iy = bnd.maxX + PAD + 6 + size / 2, bnd.maxY - size / 2
+				else
+					ix, iy = cx, by + size / 2 + (badge and 3 or 0)
+					by = by + size + (badge and 8 or 2)
+				end
+				drawIconPreview(ICON_KINDS[math.floor(now / 1.6) % #ICON_KINDS + 1], ix, iy, size, badge)
+			else
+				hideIconPreview()
+			end
 			if feat.Weapon and hasB then
 				showPreviewText("weapon", "Weapon", cx, by, 0.5, 0, colorFor(slots.weapon, nil), slots.weapon.a, opt.font)
 				by = by + LINE_H
@@ -3513,6 +3803,8 @@ return function(lib)
 			return {
 				box = {}, boxShown = 0,
 				boxOut = {}, boxOutShown = 0,
+				glow = {{list = {}, shown = 0}, {list = {}, shown = 0}, {list = {}, shown = 0}},
+				iconLines = {}, iconShown = 0, iconBg = nil, iconBorder = nil, iconOn = false,
 				skel = {}, skelShown = 0,
 				joint = {}, jointShown = 0,
 				trc = {}, trcShown = 0,
@@ -3543,7 +3835,7 @@ return function(lib)
 			if not rec then
 				return
 			end
-			for _, list in ipairs({rec.box, rec.boxOut, rec.skel, rec.joint, rec.trc, rec.look, rec.vel, rec.trailLines, rec.fillList}) do
+			for _, list in ipairs({rec.box, rec.boxOut, rec.skel, rec.joint, rec.trc, rec.look, rec.vel, rec.trailLines, rec.fillList, rec.glow[1].list, rec.glow[2].list, rec.glow[3].list, rec.iconLines}) do
 				for _, obj in ipairs(list) do
 					kill(obj)
 				end
@@ -3556,6 +3848,8 @@ return function(lib)
 			end
 			if rec.ghostSq then kill(rec.ghostSq) end
 			if rec.dot then kill(rec.dot) end
+			if rec.iconBg then kill(rec.iconBg) end
+			if rec.iconBorder then kill(rec.iconBorder) end
 			if rec.arrow then kill(rec.arrow) end
 			for _, t in pairs(rec.text) do kill(t) end
 			if rec.cham then
@@ -3615,6 +3909,17 @@ return function(lib)
 			rec.boxShown = 0
 			hideShown(rec.boxOut, rec.boxOutShown)
 			rec.boxOutShown = 0
+			for _, g in ipairs(rec.glow) do
+				hideShown(g.list, g.shown)
+				g.shown = 0
+			end
+			if rec.iconOn then
+				hideShown(rec.iconLines, rec.iconShown)
+				rec.iconShown = 0
+				rec.iconBg.Visible = false
+				rec.iconBorder.Visible = false
+				rec.iconOn = false
+			end
 			hideShown(rec.skel, rec.skelShown)
 			rec.skelShown = 0
 			hideShown(rec.joint, rec.jointShown)
@@ -3662,9 +3967,10 @@ return function(lib)
 				table.insert(list, newLine(z))
 			end
 			local alpha = dAlpha(a * curFade)
+			local isFn = type(c) == "function"
 			for i = 1, count do
 				local sg, l = src[i], list[i]
-				l.Color = c
+				l.Color = isFn and c(sg) or c
 				l.Transparency = alpha
 				l.Thickness = thick
 				l.From = Vector2.new(sg[1], sg[2])
@@ -4022,6 +4328,64 @@ return function(lib)
 			end
 		end
 
+		-- weapon icon (badge background + glyph lines)
+		local function hideIcon(rec)
+			if rec.iconOn then
+				hideShown(rec.iconLines, rec.iconShown)
+				rec.iconShown = 0
+				rec.iconBg.Visible = false
+				rec.iconBorder.Visible = false
+				rec.iconOn = false
+			end
+		end
+
+		local function drawIcon(rec, kind, ix, iy, size)
+			if not rec.iconBg then
+				rec.iconBg = newSquare(4)
+				rec.iconBg.Color = Color3.fromRGB(14, 14, 18)
+				local b = Drawing.new("Square")
+				b.Filled = false
+				b.Thickness = 1
+				b.Visible = false
+				setZ(b, 5)
+				rec.iconBorder = b
+			end
+			local col = colorOf(slots.icon)
+			if opt.iconStyle == "Badge" then
+				local bs = size + 6
+				rec.iconBg.Position = Vector2.new(ix - bs / 2, iy - bs / 2)
+				rec.iconBg.Size = Vector2.new(bs, bs)
+				rec.iconBg.Transparency = dAlpha(0.7 * curFade)
+				rec.iconBg.Visible = true
+				rec.iconBorder.Position = rec.iconBg.Position
+				rec.iconBorder.Size = rec.iconBg.Size
+				rec.iconBorder.Color = col
+				rec.iconBorder.Transparency = dAlpha(0.45 * curFade)
+				rec.iconBorder.Visible = true
+			else
+				rec.iconBg.Visible = false
+				rec.iconBorder.Visible = false
+			end
+			local n = computeIcon(kind, ix, iy, size, iconSeg)
+			while #rec.iconLines < n do
+				table.insert(rec.iconLines, newLine(6))
+			end
+			for i = 1, n do
+				local sg, l = iconSeg[i], rec.iconLines[i]
+				l.From = Vector2.new(sg[1], sg[2])
+				l.To = Vector2.new(sg[3], sg[4])
+				l.Thickness = sg[5]
+				l.Color = col
+				l.Transparency = dAlpha(slots.icon.a * curFade)
+				l.Visible = true
+			end
+			for i = n + 1, rec.iconShown do
+				rec.iconLines[i].Visible = false
+			end
+			rec.iconShown = n
+			rec.iconOn = true
+		end
+
 		-- ====================================================
 		-- per player. hl = {n = Highlights used this frame}
 		-- ====================================================
@@ -4189,20 +4553,33 @@ return function(lib)
 					mode = "Solid"
 				end
 				local c2 = colorOverridden() and c1:Lerp(Color3.new(0, 0, 0), 0.55) or colorOf(slots.fill2)
-				local fn = computeFill(mode, c1, slots.fill.a, c2, slots.fill2.a)
+				local fn = computeFill(mode, c1, slots.fill.a, c2, slots.fill2.a, opt.fillAnim, now * (OPT.speeds[opt.fillSpeed] or 1))
 				rec.fillShown = setFill(rec.fillList, rec.fillShown, fn, fillRects)
 			elseif rec.fillShown > 0 then
 				hideShown(rec.fillList, rec.fillShown)
 				rec.fillShown = 0
 			end
 
-			-- box: shape + pulse (+ dark outline behind it)
+			-- box: shape, animated dashes, gradient, glow, pulse (+ dark outline behind it)
+			local speed = OPT.speeds[opt.boxSpeed] or 1
+			dashPhase = opt.dashAnim == "On" and (now * 0.35 * speed) % 1 or 0
 			local pm = opt.boxPulse == "On" and pulseMul(now) or 1
 			local n = feat.Box and computeBox(char, project, opt.style, hasB, opt.boxShape) or 0
 			local outN = (n > 0 and opt.boxOutline == "On") and n or 0
 			rec.boxOutShown = setLines(rec.boxOut, rec.boxOutShown, outN, segs, OUTLINE_COLOR, 0.8 * pm, THICKNESS + 2, 2)
-			rec.boxShown = setLines(rec.box, rec.boxShown, n, segs, colorFor(slots.box, player, true), slots.box.a * pm,
-				THICKNESS * (opt.boxPulse == "On" and (0.85 + 0.35 * pm) or 1), 3)
+			local boxCol = boxColorFn(player, n, now, speed)
+			local thickB = THICKNESS * (opt.boxPulse == "On" and (0.85 + 0.35 * pm) or 1)
+			local glowN = GLOW_LEVELS[opt.boxGlow] or 0
+			for gi = 1, 3 do
+				local g = rec.glow[gi]
+				if gi <= glowN and n > 0 then
+					g.shown = setLines(g.list, g.shown, n, segs, boxCol, slots.box.a * pm * (0.22 / gi), thickB + gi * 3, 2)
+				elseif g.shown > 0 then
+					hideShown(g.list, g.shown)
+					g.shown = 0
+				end
+			end
+			rec.boxShown = setLines(rec.box, rec.boxShown, n, segs, boxCol, slots.box.a * pm, thickB, 3)
 
 			-- skeleton (+ joint dots)
 			local sn, jn = 0, 0
@@ -4393,7 +4770,22 @@ return function(lib)
 
 			-- weapon, then distance, under the player
 			local by = bnd.maxY + PAD + 2 + bottomRoom
-			local wStr = (feat.Weapon and hasB) and weaponName(char) or nil
+			local toolName = ((feat.Weapon or feat.WeaponIcon) and hasB) and weaponName(char) or nil
+			if feat.WeaponIcon and hasB and toolName then
+				local size = OPT.iconSizes[opt.iconSize] or 20
+				local badge = opt.iconStyle == "Badge"
+				local ix, iy
+				if opt.iconPos == "Right" then
+					ix, iy = bnd.maxX + PAD + 6 + size / 2, bnd.maxY - size / 2
+				else
+					ix, iy = cx, by + size / 2 + (badge and 3 or 0)
+					by = by + size + (badge and 8 or 2)
+				end
+				drawIcon(rec, weaponKind(toolName), ix, iy, size)
+			else
+				hideIcon(rec)
+			end
+			local wStr = (feat.Weapon and hasB) and toolName or nil
 			if wStr then
 				local t = getText(rec, "weapon", wStr, colorFor(slots.weapon, player), slots.weapon.a, opt.font)
 				showText(rec, "weapon", t, cx, by)
@@ -4490,7 +4882,7 @@ return function(lib)
 			for _, l in ipairs(ringLines) do
 				kill(l)
 			end
-			local pools = {prevBox, prevBoxOut, prevSkel, prevJoint, prevTrc, prevFill, prevLook, prevGhost, prevHit}
+			local pools = {prevBox, prevBoxOut, prevSkel, prevJoint, prevTrc, prevFill, prevLook, prevGhost, prevHit, prevFillStrips, prevIconBg, prevIcon, prevGlow[1], prevGlow[2], prevGlow[3]}
 			for _, pool in pairs(prevBars) do
 				table.insert(pools, pool)
 			end
@@ -4571,6 +4963,11 @@ return function(lib)
 			SetStatusText = function(value) sw.Status.Set(value) end,
 			SetDamageNumbers = function(value) sw.Damage.Set(value) end,
 			SetHitMarkers = function(value) sw.HitMarker.Set(value) end,
+			SetWeaponIcon = function(value) sw.WeaponIcon.Set(value) end,
+			SetWeaponIconStyle = function(name) pick("iconStyle", OPT.iconStyles, name) end, -- Badge / Glyph
+			SetWeaponIconSize = function(name) pick("iconSize", OPT.iconSizeNames, name) end, -- Small / Medium / Large
+			SetWeaponIconPosition = function(name) pick("iconPos", OPT.iconPositions, name) end, -- Below / Right
+			SetWeaponIconColor = function(c) setSlot(slots.icon, c) end,
 			SetFootsteps = function(value) sw.Footsteps.Set(value) end,
 
 			-- box
@@ -4583,6 +4980,14 @@ return function(lib)
 				ui.refresh()
 			end,
 			SetBoxOutline = function(value) onOff("boxOut", value) end,
+			SetBoxDashAnimation = function(value) onOff("dashAnim", value) end,
+			SetBoxGradient = function(name) pick("boxGrad", OPT.gradModes, name) end, -- Off / Two-tone / Rainbow
+			SetBoxGradientAnimation = function(value) onOff("boxGradAnim", value) end,
+			SetBoxGlow = function(name) pick("boxGlow", OPT.glowLevels, name) end, -- Off / Low / Medium / High
+			SetBoxAnimationSpeed = function(name) pick("boxSpeed", OPT.speedNames, name) end,
+			SetBoxSecondColor = function(c) setSlot(slots.box2, c) end,
+			SetFillAnimation = function(name) pick("fillAnim", OPT.fillAnims, name) end, -- Off / Scan / Pulse / Wave / Rainbow
+			SetFillAnimationSpeed = function(name) pick("fillSpeed", OPT.speedNames, name) end,
 			SetBoxFillMode = function(name) pick("fillMode", OPT.fillModes, name) end, -- Solid / Fade Down / Fade Up / Two-tone / Health
 			SetBoxFillColor = function(c, a)
 				setSlot(slots.fill, c)
